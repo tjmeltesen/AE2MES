@@ -1,0 +1,20 @@
+{
+  "jobId": "job-cloud-001",
+  "machineAddress": "machine-lathe",
+  "registry": {
+    "machineAddress": "machine-lathe",
+    "transposerAddress": "transposer-001",
+    "storeInterfaceAddress": "iface-store",
+    "stockInterfaceAddress": "iface-stock",
+    "databaseAddress": "db-001",
+    "sides": { "transposerStore": 1, "transposerStock": 2 }
+  },
+  "sequenceFlow": {
+    "items": [{ "name": "minecraft:iron_ingot", "count": 64 }],
+    "fluids": [],
+    "steps": [
+      { "type": "wait", "target": "machineAddress", "params": {} },
+      { "type": "wait", "target": "machineAddress", "params": {} }
+    ]
+  }
+}

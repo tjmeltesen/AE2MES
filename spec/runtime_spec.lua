@@ -1,0 +1,12 @@
+describe("Runtime tick cycle", function()
+    before_each(run_before)
+
+    it("runs a full tick with mock cloud", function()
+        step("a runtime with mock cloud")
+        step("I tick runtime 1 times")
+        step("runtime active job count should be 1")
+        step("I tick runtime 3 times")
+        step("runtime active job count should be 0")
+        step("runtime tick cycle should complete without error")
+    end)
+end)

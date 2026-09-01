@@ -1,0 +1,67 @@
+describe("JSON encoding and decoding", function()
+    before_each(run_before)
+
+    it("decodes primitives", function()
+        step('JSON input "null"')
+        step("I decode the JSON input")
+        step("the decoded value should equal null")
+
+        step('JSON input "true"')
+        step("I decode the JSON input")
+        step("the decoded value should equal true")
+
+        step('JSON input "42"')
+        step("I decode the JSON input")
+        step("the decoded value should equal 42")
+    end)
+
+    it("decodes object with whitespace", function()
+        step('JSON input "  { \"a\" : 1 }  "')
+        step("I decode the JSON input")
+        step('the decoded value should equal {"a":1}')
+    end)
+
+    it("decodes escaped string", function()
+        local JSON = require("JSON")
+        local assertions = require("assertions")
+        local world = require("world")
+        world.lastValue = [["say \"hi\""]]
+        world.lastValue = JSON.decode(world.lastValue)
+        assertions.assertDeepEqual("say \"hi\"", world.lastValue, "decoded escaped string")
+    end)
+
+    it("decodes nested structure", function()
+        step('JSON input "{\"user\":{\"id\":7,\"name\":\"alice\"},\"tags\":[\"a\",\"b\"]}"')
+        step("I decode the JSON input")
+        step('the decoded value should equal {"user":{"id":7,"name":"alice"},"tags":["a","b"]}')
+    end)
+
+    it("encodes primitives", function()
+        step("JSON value true")
+        step("I encode the JSON value")
+        step('the encoded value should be "true"')
+
+        step("JSON value 42")
+        step("I encode the JSON value")
+        step('the encoded value should be "42"')
+    end)
+
+    it("round-trips nested telemetry structure", function()
+        step("a JSON table")
+        step('table field "schemaVersion" is 1')
+        step('table field "brokerId" is "broker-alpha"')
+        step('table field "queueLength" is 3')
+        step("I round-trip the JSON value")
+        step("the round-tripped value should equal the original")
+    end)
+
+    it("rejects trailing garbage on decode", function()
+        step([[JSON input "{\"a\":1}extra"]])
+        step("decoding should fail")
+    end)
+
+    it("rejects unsupported type on encode", function()
+        step("an unsupported JSON value type")
+        step("encoding should fail")
+    end)
+end)

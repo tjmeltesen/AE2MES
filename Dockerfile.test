@@ -1,0 +1,13 @@
+FROM debian:bullseye-slim
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq build-essential lua5.2 liblua5.2-dev luarocks && \
+    luarocks install busted && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY . .
+
+RUN sed -i 's/\r$//' scripts/run_tests.sh && chmod +x scripts/run_tests.sh
+
+CMD ["busted"]
