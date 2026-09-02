@@ -1,4 +1,4 @@
-# AE2-ES2
+# AE2MES
 
 OpenComputers MES node client for AE2/GT automation.
 
