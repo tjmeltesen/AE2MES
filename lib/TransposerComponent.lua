@@ -184,7 +184,7 @@ function TransposerComponent:discoverSides()
         [4] = "West",
         [5] = "East"
     }
-    for side = 1, 6 do
+    for side = 0, 5 do
         local slots = self:getInventorySize(side)
         local container_name = self:getInventoryName(side)
         if slots and container_name then

@@ -12,15 +12,22 @@ local Interface = setmetatable({}, { __index = BaseComponent })
 Interface.__index = Interface
 
 ---Creates a new Interface instance with the specified address.
+---When databaseObj is provided, pre-builds the interface config plan from its cached index.
 ---@param address string # The component address of the ME Interface.
+---@param databaseObj? DatabaseComponent # Optional database to read slot refs from at construction.
 ---@return Interface | nil, string | nil # A new Interface instance, or nil and an error message if the address is invalid.
-function Interface:new(address)
+function Interface:new(address, databaseObj)
     local self, err = BaseComponent.new(self, address)
     if not self then
         return nil, err
     end
     self.MAX_SLOTS = 9
     self.MAX_FLUID_SLOTS = 6
+    self._configPlan = nil
+    self._trackedConfigs = nil
+    if databaseObj then
+        self:bindDatabase(databaseObj)
+    end
     return self
 end
 
@@ -29,7 +36,7 @@ end
 ---============================================================
 
 ---Sets the item being stocked in a specific slot of the interface.
----@param slot integer # The slot index to configure. (0-8)
+---@param slot integer # The slot index to configure. (1-9)
 ---@param dbAddress string # The address of a database that contains the item to stock.
 ---@param dbSlot integer # The index of the item within the database.
 ---@param count? integer # The amount of items to stock in the interface. (defaults to 1)
@@ -85,61 +92,125 @@ end
 --- Custom Interface Functions
 ---============================================================
 
-function Interface:clearAllConfigurations()
-    for i = 0, self.MAX_SLOTS - 1 do
-        self:clearConfiguration(i)
-    end
-    for i = 0, self.MAX_FLUID_SLOTS - 1 do
-        self:clearFluidConfiguration(i)
-    end
+local function isConfigured(value)
+    return value ~= nil and value ~= false
 end
 
---- Sets all configurations for the interface from what is stored in the database
----@param databaseObj DatabaseComponent # The database object to get the configurations from
----@return boolean True if the configurations were set successfully, false otherwise
-function Interface:setAllConfigurations(databaseObj)
-    local dbAddress = databaseObj.address
-    local dbSlots = databaseObj.size
+---Build interface slot refs from a database index (items then fluids).
+---@param databaseObj DatabaseComponent
+---@return table plan
+local function buildConfigPlan(databaseObj)
+    local plan = {
+        dbAddress = databaseObj.address,
+        items = {},
+        fluids = {},
+        tracked = {},
+    }
 
-    local itemSlot = 0
-    local fluidSlot = 0
+    local itemSlot = 1
+    local fluidSlot = 1
+    local index = databaseObj.index or databaseObj:refreshIndex()
 
-    for dbSlot = 1, dbSlots do
-        local itemStack = databaseObj:get(dbSlot)
-
-        if itemStack then
-            if itemStack.fluidDrop ~= nil then
-                -- Fluid configuration
-                if fluidSlot < self.MAX_FLUID_SLOTS then
-                    self:setFluidConfiguration(
-                        fluidSlot,
-                        dbAddress,
-                        dbSlot
-                    )
-
-                    fluidSlot = fluidSlot + 1
-                end
-            else
-                -- Item configuration
-                if itemSlot < self.MAX_SLOTS then
-                    self:setConfiguration(
-                        itemSlot,
-                        dbAddress,
-                        dbSlot
-                    )
-
-                    itemSlot = itemSlot + 1
-                end
+    for _, entry in ipairs(index) do
+        if entry.fluid then
+            if fluidSlot <= 6 then
+                plan.fluids[#plan.fluids + 1] = {
+                    side = fluidSlot,
+                    dbSlot = entry.dbSlot,
+                }
+                plan.tracked[#plan.tracked + 1] = {
+                    slot = fluidSlot,
+                    fluid = true,
+                    dbSlot = entry.dbSlot,
+                }
+                fluidSlot = fluidSlot + 1
             end
+        elseif itemSlot <= 9 then
+            plan.items[#plan.items + 1] = {
+                slot = itemSlot,
+                dbSlot = entry.dbSlot,
+                count = 64,
+            }
+            plan.tracked[#plan.tracked + 1] = {
+                slot = itemSlot,
+                fluid = false,
+                dbSlot = entry.dbSlot,
+            }
+            itemSlot = itemSlot + 1
         end
 
-        -- Stop once both configuration areas are full.
-        if itemSlot >= self.MAX_SLOTS
-            and fluidSlot >= self.MAX_FLUID_SLOTS then
+        if itemSlot > 9 and fluidSlot > 6 then
             break
         end
     end
 
+    return plan
+end
+
+---Attach a database and cache its slot-to-interface mapping for setAllConfigurations.
+---@param databaseObj DatabaseComponent
+---@return table plan
+function Interface:bindDatabase(databaseObj)
+    self._configPlan = buildConfigPlan(databaseObj)
+    self._trackedConfigs = self._configPlan.tracked
+    return self._configPlan
+end
+
+---Clear interface item/fluid configs. Uses tracked slots from setAllConfigurations when
+---available; pass opts.tracked to override. Skips empty slots by default (opts.skipEmpty).
+---@param opts? { tracked?: { slot: integer, fluid: boolean }[], skipEmpty?: boolean }
+function Interface:clearAllConfigurations(opts)
+    opts = type(opts) == "table" and opts or {}
+    local skipEmpty = opts.skipEmpty ~= false
+    local tracked = opts.tracked or self._trackedConfigs
+
+    if tracked and #tracked > 0 then
+        for _, entry in ipairs(tracked) do
+            if entry.fluid then
+                self:clearFluidConfiguration(entry.slot)
+            else
+                self:clearConfiguration(entry.slot)
+            end
+        end
+        self._trackedConfigs = nil
+        return
+    end
+
+    for i = 0, self.MAX_SLOTS - 1 do
+        if not skipEmpty or isConfigured(self:callNetwork("getInterfaceConfiguration", i)) then
+            self:clearConfiguration(i)
+        end
+    end
+    for i = 0, self.MAX_FLUID_SLOTS - 1 do
+        if not skipEmpty or isConfigured(self:callNetwork("getFluidInterfaceConfiguration", i)) then
+            self:clearFluidConfiguration(i)
+        end
+    end
+end
+
+--- Sets all configurations for the interface from a bound database plan.
+---@param databaseObj? DatabaseComponent # Optional; refreshes the plan when address differs.
+---@return boolean
+function Interface:setAllConfigurations(databaseObj)
+    if databaseObj then
+        if not self._configPlan or self._configPlan.dbAddress ~= databaseObj.address then
+            self:bindDatabase(databaseObj)
+        end
+    elseif not self._configPlan then
+        return false
+    end
+
+    local plan = self._configPlan
+    local dbAddress = plan.dbAddress
+
+    for _, entry in ipairs(plan.items) do
+        self:setConfiguration(entry.slot, dbAddress, entry.dbSlot, entry.count)
+    end
+    for _, entry in ipairs(plan.fluids) do
+        self:setFluidConfiguration(entry.side, dbAddress, entry.dbSlot)
+    end
+
+    self._trackedConfigs = plan.tracked
     return true
 end
 

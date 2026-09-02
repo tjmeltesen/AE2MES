@@ -5,25 +5,133 @@
 ---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/abstracts/base-component.lua
 ---@version 1.0.0
 ---@class BaseComponent
+---@field component table # Injected OpenComputers component library.
 ---@field slot integer # Physical slot in the computer; -1 if not applicable.
 ---@field address string # The address of the component.
 
-local ComponentLibrary = require("ComponentLibrary")
 local NetworkItems = require("NetworkItems")
 local unpack = table.unpack or unpack
 
+local defaultComponent = require("component")
+
 local BaseComponent = {}
 BaseComponent.__index = BaseComponent
+BaseComponent.VERSION = 2
 
-function BaseComponent:new(address)
+local function componentApi(opts)
+    if type(opts) == "table" and opts.component then
+        return opts.component
+    end
+    return defaultComponent
+end
+
+---============================================================
+--- Class-level component library helpers
+---============================================================
+
+---@return table
+function BaseComponent.component()
+    return defaultComponent
+end
+
+---@param address string
+---@param methodName string
+---@return string|nil
+function BaseComponent.docFor(address, methodName)
+    return defaultComponent.doc(address, methodName)
+end
+
+---@param address string
+---@param methodName string
+---@vararg any
+---@return any
+function BaseComponent.invokeFor(address, methodName, ...)
+    return defaultComponent.invoke(address, methodName, ...)
+end
+
+---@param filter? string
+---@param exact? boolean
+---@return table<string, string>
+function BaseComponent.list(filter, exact)
+    return defaultComponent.list(filter, exact)
+end
+
+---@param address string
+---@return table<string, boolean>
+function BaseComponent.methodsFor(address)
+    return defaultComponent.methods(address)
+end
+
+---@param address string
+---@param componentType? string
+---@return any|nil
+function BaseComponent.proxyFor(address, componentType)
+    if componentType ~= nil then
+        return defaultComponent.proxy(address, componentType)
+    end
+    return defaultComponent.proxy(address)
+end
+
+---@param address string
+---@return string|nil
+function BaseComponent.typeFor(address)
+    return defaultComponent.type(address)
+end
+
+---@param address string
+---@return integer
+function BaseComponent.slotFor(address)
+    local slot = defaultComponent.slot(address)
+    if slot == nil then
+        return -1
+    end
+    return slot
+end
+
+---@param address string
+---@param componentType? string
+---@return string|nil
+function BaseComponent.resolve(address, componentType)
+    return defaultComponent.get(address, componentType)
+end
+
+---@param componentType string
+---@return boolean
+function BaseComponent.isAvailable(componentType)
+    return defaultComponent.isAvailable(componentType)
+end
+
+---@param componentType string
+---@return any
+function BaseComponent.getPrimary(componentType)
+    return defaultComponent.getPrimary(componentType)
+end
+
+---@param componentType string
+---@param address string|nil
+function BaseComponent.setPrimary(componentType, address)
+    return defaultComponent.setPrimary(componentType, address)
+end
+
+---============================================================
+--- Instance lifecycle
+---============================================================
+
+---@param address string
+---@param opts? table|nil # Optional { component = require("component") } for test injection.
+---@return BaseComponent|nil
+---@return string|nil
+function BaseComponent:new(address, opts)
     if type(address) ~= "string" or address == "" then
         return nil, "BaseComponent:new() — invalid address"
     end
 
+    local component = componentApi(opts)
     local self = setmetatable({}, self)
+    self.component = component
     self.address = address
-    self.slot = ComponentLibrary.slot(address)
-    self.proxy = nil
+    self.slot = component.slot(address) or -1
+    self._proxy = nil
     return self
 end
 
@@ -31,92 +139,93 @@ function BaseComponent:getAddress()
     return self.address
 end
 
+---@return string|nil
 function BaseComponent:getType()
-    return ComponentLibrary.type(self.address)
+    return self.component.type(self.address)
 end
 
+---@return integer
+function BaseComponent:getSlot()
+    return self.slot
+end
+
+---@return table|nil
+---@return string|nil
 function BaseComponent:getProxy()
-    if self.proxy then
-        return self.proxy
+    if self._proxy then
+        return self._proxy
     end
 
-    local proxy, err = ComponentLibrary.proxy(self.address)
-    if not proxy then
-        return nil, err
+    local ok, proxy = pcall(self.component.proxy, self.address)
+    if not ok or not proxy then
+        return nil, "BaseComponent:getProxy() — failed for " .. tostring(self.address)
     end
 
-    self.proxy = proxy
-    return self.proxy
+    self._proxy = proxy
+    return self._proxy
 end
 
 function BaseComponent:invalidate()
-    self.proxy = nil
+    self._proxy = nil
 end
 
----Invoke a standard OC component method (colon-call: proxy passed as first arg).
-function BaseComponent:call(method, ...)
-    local proxy, err = self:getProxy()
-    if not proxy then
-        return nil, err
-    end
+---============================================================
+--- Instance component invocation
+---============================================================
 
-    local fn = proxy[method]
-    if type(fn) ~= "function" then
-        return nil, "BaseComponent:call() — method unavailable: " .. tostring(method)
-    end
-
-    local args = { ... }
-    local ok, result = pcall(function()
-        return fn(proxy, unpack(args))
-    end)
-
-    if not ok then
-        self:invalidate()
-        return nil, tostring(result)
-    end
-
-    return result
-end
-
----Invoke a CommonNetworkAPI method (dot-call only — never pass proxy as self).
-function BaseComponent:callNetwork(method, ...)
+---@param method string
+---@vararg any
+---@return any
+---@return string|nil
+function BaseComponent:invoke(method, ...)
+    local address = self.address
+    local component = self.component
     local args = { ... }
     local nargs = select("#", ...)
 
-    local ok, result = pcall(function()
+    local results = { pcall(function()
         if nargs == 0 then
-            return ComponentLibrary.invoke(self.address, method)
+            return component.invoke(address, method)
         end
-        return ComponentLibrary.invoke(self.address, method, unpack(args))
-    end)
+        return component.invoke(address, method, unpack(args))
+    end) }
 
-    if ok then
-        return result
-    end
-
-    local proxy, err = self:getProxy()
-    if not proxy then
-        return nil, err
-    end
-
-    local fn = proxy[method]
-    if type(fn) ~= "function" then
-        return nil, "BaseComponent:callNetwork() — method unavailable: " .. tostring(method)
-    end
-
-    ok, result = pcall(function()
-        if nargs == 0 then
-            return fn()
-        end
-        return fn(unpack(args))
-    end)
-
+    local ok = table.remove(results, 1)
     if not ok then
         self:invalidate()
-        return nil, tostring(result)
+        return nil, tostring(results[1])
     end
 
-    return result
+    return unpack(results)
+end
+
+---@param method string
+---@return string|nil
+function BaseComponent:doc(method)
+    return self.component.doc(self.address, method)
+end
+
+---@return table<string, boolean>
+function BaseComponent:methods()
+    return self.component.methods(self.address)
+end
+
+---Invoke a standard OC component method via component.invoke.
+---@param method string
+---@vararg any
+---@return any
+---@return string|nil
+function BaseComponent:call(method, ...)
+    return self:invoke(method, ...)
+end
+
+---Invoke a CommonNetworkAPI method via component.invoke (dot-call semantics).
+---@param method string
+---@vararg any
+---@return any
+---@return string|nil
+function BaseComponent:callNetwork(method, ...)
+    return self:call(method, ...)
 end
 
 ---Get an iterator object for the list of the items in the network.

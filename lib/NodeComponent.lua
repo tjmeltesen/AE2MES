@@ -13,7 +13,7 @@
 ---     "interfaceAddress": "iface-001",
 ---     "databaseAddress": "db-001",
 ---     "redstoneAddress": "rs-001",
----     "transposerSides": { "pull": 1, "input": 2, "return": 3 },
+---     "transposerSides": { "pull": 1, "input": 2, "returnSide": 3 },
 ---     "redstoneSides": { "start": 2, "stop": 3 }
 ---   },
 ---   "sequenceFlow": {
@@ -75,6 +75,14 @@ function NodeComponent:new(transposerObj, interfaceObj, machineObj, databaseObj,
     return self
 end
 
+---============================================================
+--- Assignment parsing helpers
+---============================================================
+
+---Read a non-empty string address from a registry table entry.
+---@param registry table # Assignment registry map from cloud JSON.
+---@param key string # Registry key to look up (e.g. "machineAddress").
+---@return string | nil # The address string, or nil when missing or empty.
 local function registryAddress(registry, key)
     local value = registry[key]
     if type(value) == "string" and value ~= "" then
@@ -83,6 +91,11 @@ local function registryAddress(registry, key)
     return nil
 end
 
+---Normalize assignment input into a plain schema-v1 table.
+---Accepts a JSON string, a raw assignment table, or a parsed Assignment object from src/Assignment.lua.
+---@param input string | table # JSON string, assignment table, or Assignment instance.
+---@return table | nil data # Normalized assignment table.
+---@return string | nil error # Error message when normalization fails.
 local function coerceAssignment(input)
     if type(input) == "string" then
         local ok, data = pcall(JSON.decode, input)
@@ -135,9 +148,11 @@ local function coerceAssignment(input)
 end
 
 ---Load job metadata, registry side maps, sequence flow, and wire component wrappers from an assignment.
----@param input string | table # JSON string or assignment table (schema v1); also accepts parsed Assignment objects from src/Assignment.lua
----@return boolean ok
----@return string | nil error
+---Populates schemaVersion, jobId, machineAddress, transposerSides, redstoneSides, items, fluids, and steps on self,
+---then instantiates any component wrappers whose addresses are present in the registry.
+---@param input string | table # JSON string or assignment table (schema v1); also accepts parsed Assignment objects from src/Assignment.lua.
+---@return boolean ok # True when the assignment was loaded and all component addresses resolved.
+---@return string | nil error # Error message when parsing or component wiring fails.
 function NodeComponent:readAssignment(input)
     local data, err = coerceAssignment(input)
     if not data then
@@ -180,15 +195,15 @@ function NodeComponent:readAssignment(input)
         end
     end
 
-    if interfaceAddr then
-        local _, setErr = self:setInterface(interfaceAddr)
+    if databaseAddr then
+        local _, setErr = self:setDatabase(databaseAddr)
         if setErr then
             return false, setErr
         end
     end
 
-    if databaseAddr then
-        local _, setErr = self:setDatabase(databaseAddr)
+    if interfaceAddr then
+        local _, setErr = self:setInterface(interfaceAddr)
         if setErr then
             return false, setErr
         end
@@ -245,7 +260,7 @@ end
 ---@param interfaceAddr string # The address of the interface component.
 ---@return Interface | nil, string | nil # The interface component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setInterface(interfaceAddr)
-    self.interface = Interface:new(interfaceAddr)
+    self.interface = Interface:new(interfaceAddr, self.database)
     if not self.interface then
         return nil, "Failed to create InterfaceComponent instance"
     end
@@ -270,6 +285,9 @@ function NodeComponent:setDatabase(databaseAddr)
     self.database = DatabaseComponent:new(databaseAddr)
     if not self.database then
         return nil, "Failed to create DatabaseComponent instance"
+    end
+    if self.interface then
+        self.interface:bindDatabase(self.database)
     end
     return self.database
 end
@@ -315,29 +333,218 @@ function NodeComponent:getRedstone()
     return self.redstone
 end
 
+---============================================================
+--- Transfer pipeline helpers
+---============================================================
 
+---Maximum seconds to wait for the interface side to drain after a pull.
+local DRAIN_TIMEOUT_SEC = 10
+---Maximum seconds to wait for the machine to report active processing.
+local PROCESS_TIMEOUT_SEC = 10
+---Polling interval used by timed wait helpers.
+local POLL_INTERVAL_SEC = 0.1
 
--- This will be used to transfer the items from the buffer to the machine --> into the bus ensure empty for both fluids and items --> done
----@return boolean True if the transfer was successful, false otherwise
-function NodeComponent:transferToMachine(fromSide, toSide)
-    self.interface:clearAllConfigurations()
-    self.interface:setAllConfigurations(self.database)
-    self.transposer:drainInventory(fromSide, toSide)
-    while not self.interface:isEmpty() do
-        os.sleep(0.1)
+---Poll a predicate until it returns true or the timeout elapses.
+---@param predicate fun(): boolean # Function evaluated each poll interval.
+---@param timeoutSec number # Maximum seconds to wait.
+---@return boolean # True when predicate returned true before the deadline.
+local function waitUntil(predicate, timeoutSec)
+    local deadline = os.clock() + timeoutSec
+    while os.clock() < deadline do
+        if predicate() then
+            return true
+        end
+        os.sleep(POLL_INTERVAL_SEC)
     end
-    return true
-    --[[ self.machine:parseSensorInformation() If processing then initiate empty from bus to chest --> Return for residual items.
-    if self.machine:isProcessing() then
-        return true
-    end
-    return false ]]
+    return predicate()
 end
 
--- Idea is that based on the Cloud passdown we construct our node object which we then use to process the job
-function NodeComponent:executeJobAssignment(jobID) end --get the job assignment from the cloud which contains the items/fluids to be processed and appropriate machine configurations and steps, set the node object with the appropriate job parameters and execute the job
+---Check whether a transposer side currently holds at least one item stack.
+---@param transposer TransposerComponent # Transposer used to inspect inventory.
+---@param side number # OC side index to inspect.
+---@return boolean # True when one or more stacks are present.
+local function sideHasItems(transposer, side)
+    local contents = transposer:getInventoryContents(side)
+    return contents ~= nil and #contents > 0
+end
 
-function NodeComponent:isDone() end -- Return true if the recipe is done, false otherwise
+---Check whether a transposer side has no item stacks remaining.
+---@param transposer TransposerComponent # Transposer used to inspect inventory.
+---@param side number # OC side index to inspect.
+---@return boolean # True when the side inventory is empty.
+local function sideIsEmpty(transposer, side)
+    local contents = transposer:getInventoryContents(side)
+    return contents ~= nil and #contents == 0
+end
+
+---Check whether a database contains at least one non-fluid item entry.
+---@param database DatabaseComponent # Database whose slots are scanned.
+---@return boolean # True when a solid item stack is configured.
+local function databaseHasItems(database)
+    for slot = 1, database:getSize() do
+        local stack = database:get(slot)
+        if stack and stack.fluidDrop == nil then
+            return true
+        end
+    end
+    return false
+end
+
+---Check whether a GT machine is actively processing a recipe.
+---@param machine Machine | nil # Machine component to poll.
+---@return boolean # True when pollAvailability reports active processing.
+local function machineIsProcessing(machine)
+    if not machine then
+        return false
+    end
+    local availability = machine:pollAvailability()
+    return availability ~= nil and availability.active == true
+end
+
+---Check whether a GT machine has finished its current recipe.
+---@param machine Machine | nil
+---@return boolean
+local function machineIsDone(machine)
+    if not machine then
+        return false
+    end
+    local availability = machine:pollAvailability()
+    if not availability then
+        return false
+    end
+
+    local current = availability.progressCurrent
+    local max = availability.progressMax
+    if type(current) == "number" and type(max) == "number" and max > 0 and current >= max then
+        return true
+    end
+
+    local reason = availability.unavailableReason or ""
+    return reason:find("recipe_complete", 1, true) ~= nil
+end
+
+---Move leftover stacks from the machine input bus to the return chest.
+---@param self NodeComponent
+---@param inputSide number
+---@return number|nil moved
+local function drainInputToReturn(self, inputSide)
+    local returnSide = self:transposerSide("returnSide")
+    if not self.transposer or not returnSide or not inputSide then
+        return nil
+    end
+    if not sideHasItems(self.transposer, inputSide) then
+        return 0
+    end
+    return self.transposer:drainInventory(inputSide, returnSide)
+end
+
+---============================================================
+--- Job execution
+---============================================================
+
+---Transfer stocked items and fluids from the ME interface into the machine input bus.
+---Configures the interface from the node database, waits for AE2 stocking, drains into the input bus,
+---clears interface configs, and optionally confirms the machine started processing.
+---@param fromSide number | string | nil # Transposer side facing the interface; defaults to transposerSides.pull.
+---@param toSide number | string | nil # Transposer side facing the machine input bus; defaults to transposerSides.input.
+---@param opts? { requireProcessing?: boolean } # When false, skip waiting for machine to start (default true).
+---@return boolean ok # True when transfer completes; false on timeout, drain error, or rollback.
+function NodeComponent:transferToMachine(fromSide, toSide, opts)
+    opts = type(opts) == "table" and opts or {}
+    local requireProcessing = opts.requireProcessing ~= false
+
+    if type(fromSide) == "string" then
+        fromSide = self:transposerSide(fromSide)
+    end
+    if type(toSide) == "string" then
+        toSide = self:transposerSide(toSide)
+    end
+
+    fromSide = fromSide or self:transposerSide("pull")
+    toSide = toSide or self:transposerSide("input")
+
+    if not self.interface or not self.database or not self.transposer then
+        return false
+    end
+    if not fromSide or not toSide then
+        return false
+    end
+
+    self.interface:setAllConfigurations()
+
+
+    local moved = self.transposer:drainInventory(fromSide, toSide)
+    if moved == nil then
+        self.interface:clearAllConfigurations()
+        return false
+    end
+
+    if moved > 0 then
+        if not waitUntil(function()
+            return sideIsEmpty(self.transposer, fromSide)
+        end, DRAIN_TIMEOUT_SEC) then
+            self.interface:clearAllConfigurations()
+            return false
+        end
+    end
+
+    self.interface:clearAllConfigurations()
+
+    if not requireProcessing then
+        drainInputToReturn(self, toSide)
+        return true
+    end
+
+    if not waitUntil(function()
+        return machineIsProcessing(self.machine)
+    end, PROCESS_TIMEOUT_SEC) then
+        if moved > 0 then
+            drainInputToReturn(self, toSide)
+        end
+        return false
+    end
+
+    drainInputToReturn(self, toSide)
+    return true
+end
+
+---Check whether the active recipe on the machine has finished.
+---@return boolean # True when sensor progress reports recipe complete.
+function NodeComponent:isDone()
+    return machineIsDone(self.machine)
+end
+
+---Wait until the machine reports recipe complete or the timeout elapses.
+---@param timeout number | table | nil # Seconds to wait, or { timeout = number } from assignment params.
+---@return boolean # True when isDone() before the deadline.
+function NodeComponent:waitForProcess(timeout)
+    if not self.machine then
+        return false
+    end
+
+    if type(timeout) == "table" then
+        timeout = timeout.timeout
+    end
+
+    timeout = tonumber(timeout) or 600
+    if timeout <= 0 then
+        return machineIsDone(self.machine)
+    end
+
+    if machineIsDone(self.machine) then
+        return true
+    end
+
+    return waitUntil(function()
+        return machineIsDone(self.machine)
+    end, timeout)
+end
+
+---Fetch a job assignment from the cloud and execute its sequence flow on this node.
+---@param jobID string # Cloud job identifier to load and run.
+---@return boolean | nil ok # True when the job completed successfully.
+---@return string | nil error # Error message when the job cannot be loaded or executed.
+function NodeComponent:executeJobAssignment(jobID) end
 
 
 

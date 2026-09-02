@@ -24,8 +24,28 @@ function DatabaseComponent:new(address, size)
         size = 9
     end
     self.size = size
+    self:refreshIndex()
 
     return self
+end
+
+---Scan database slots and cache non-empty entries for lookup.
+---@return table[]
+function DatabaseComponent:refreshIndex()
+    local index = {}
+    for slot = 1, self.size do
+        local stack = self:get(slot)
+        if stack then
+            index[#index + 1] = {
+                dbSlot = slot,
+                name = stack.name,
+                label = stack.label or stack.name,
+                fluid = stack.fluidDrop ~= nil,
+            }
+        end
+    end
+    self.index = index
+    return index
 end
 
 

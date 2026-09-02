@@ -178,15 +178,22 @@ local function installGlobals()
         setPrimary = function() end,
         invoke = function(address, method, ...)
             local proxy = buildProxy(address)
-            if not proxy or type(proxy[method]) ~= "function" then
+            if not proxy then
                 return nil
+            end
+            local fn = proxy[method]
+            if type(fn) ~= "function" then
+                local mt = type(fn) == "table" and getmetatable(fn) or nil
+                if not (mt and type(mt.__call) == "function") then
+                    return nil
+                end
             end
             local args = { ... }
             local nargs = select("#", ...)
             if nargs == 0 then
-                return proxy[method]()
+                return fn()
             end
-            return proxy[method](unpack(args))
+            return fn(unpack(args))
         end,
     }
 

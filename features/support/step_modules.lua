@@ -6,8 +6,8 @@ local world = require("world")
 
 local MODULES = {
     { file = "lib/JSON.lua", module = "JSON" },
-    { file = "lib/ComponentLibrary.lua", module = "ComponentLibrary" },
     { file = "lib/BaseComponent.lua", module = "BaseComponent", isClass = true },
+    { file = "lib/ComponentLibrary.lua", module = "ComponentLibrary" },
     { file = "lib/Machine.lua", module = "Machine", isClass = true },
     { file = "lib/DatabaseComponent.lua", module = "DatabaseComponent", isClass = true },
     { file = "lib/TransposerComponent.lua", module = "TransposerComponent", isClass = true },

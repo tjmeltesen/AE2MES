@@ -8,7 +8,6 @@ describe("TransposerComponent inventory", function()
         mock_oc.reset()
         package.loaded["TransposerComponent"] = nil
         package.loaded["BaseComponent"] = nil
-        package.loaded["ComponentLibrary"] = nil
         TransposerComponent = require("TransposerComponent")
     end)
 
