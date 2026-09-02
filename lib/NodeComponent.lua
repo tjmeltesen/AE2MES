@@ -1,13 +1,47 @@
 ---@meta _
----@brief Wraps all Component Objects into a single table referencing a Machine Node, each node carries a Transposer, Interface, Database, Redstone, and Machine Component
+---@brief Wraps all Component Objects into a single table referencing a Machine Node.
 ---@version 1.0.0
----@class NodeComponent 
+---
+--- MES Cloud Assignment JSON (schemaVersion 1):
+--- {
+---   "schemaVersion": 1,
+---   "jobId": "job-cloud-001",
+---   "machineAddress": "machine-lathe",
+---   "registry": {
+---     "machineAddress": "machine-lathe",
+---     "transposerAddress": "transposer-001",
+---     "interfaceAddress": "iface-001",
+---     "databaseAddress": "db-001",
+---     "redstoneAddress": "rs-001",
+---     "transposerSides": { "pull": 1, "input": 2, "return": 3 },
+---     "redstoneSides": { "start": 2, "stop": 3 }
+---   },
+---   "sequenceFlow": {
+---     "items": [{ "name": "minecraft:iron_ingot", "count": 64 }],
+---     "fluids": [],
+---     "steps": [
+---       { "method": "transferToMachine", "params": {} },
+---       { "method": "waitForProcess", "params": { "timeout": 600 } }
+---     ]
+---   }
+--- }
+---
+---@class NodeComponent
 ---@field transposer TransposerComponent | nil
 ---@field interface Interface | nil
 ---@field machine Machine | nil
 ---@field database DatabaseComponent | nil
 ---@field redstone RedstoneComponent | nil
+---@field schemaVersion number
+---@field jobId string | nil
+---@field machineAddress string | nil
+---@field transposerSides table
+---@field redstoneSides table
+---@field items table
+---@field fluids table
+---@field steps table
 
+local JSON = require("JSON")
 local TransposerComponent = require("TransposerComponent")
 local Interface = require("Interface")
 local Machine = require("Machine")
@@ -30,7 +64,170 @@ function NodeComponent:new(transposerObj, interfaceObj, machineObj, databaseObj,
     self.machine = machineObj
     self.database = databaseObj
     self.redstone = redstoneObj
+    self.schemaVersion = nil
+    self.jobId = nil
+    self.machineAddress = nil
+    self.transposerSides = {}
+    self.redstoneSides = {}
+    self.items = {}
+    self.fluids = {}
+    self.steps = {}
     return self
+end
+
+local function registryAddress(registry, key)
+    local value = registry[key]
+    if type(value) == "string" and value ~= "" then
+        return value
+    end
+    return nil
+end
+
+local function coerceAssignment(input)
+    if type(input) == "string" then
+        local ok, data = pcall(JSON.decode, input)
+        if not ok then
+            return nil, "NodeComponent:readAssignment() — JSON decode failed: " .. tostring(data)
+        end
+        return data
+    end
+
+    if type(input) ~= "table" then
+        return nil, "NodeComponent:readAssignment() — expected JSON string or assignment table"
+    end
+
+    if type(input.id) == "function" and type(input.registry) == "function" then
+        local registry = input:registry()
+        local sequenceFlow = input:sequenceFlow()
+        local registryData = {}
+
+        if registry and type(registry.get) == "function" then
+            for _, key in ipairs({
+                "machineAddress",
+                "transposerAddress",
+                "interfaceAddress",
+                "databaseAddress",
+                "redstoneAddress",
+                "transposerSides",
+                "redstoneSides",
+            }) do
+                local value = registry:get(key)
+                if value ~= nil then
+                    registryData[key] = value
+                end
+            end
+        end
+
+        return {
+            schemaVersion = type(input.schemaVersion) == "function" and input:schemaVersion() or 1,
+            jobId = input:id(),
+            machineAddress = input:machineAddress(),
+            registry = registryData,
+            sequenceFlow = sequenceFlow and {
+                items = sequenceFlow.items or {},
+                fluids = sequenceFlow.fluids or {},
+                steps = sequenceFlow.steps or {},
+            } or { items = {}, fluids = {}, steps = {} },
+        }
+    end
+
+    return input
+end
+
+---Load job metadata, registry side maps, sequence flow, and wire component wrappers from an assignment.
+---@param input string | table # JSON string or assignment table (schema v1); also accepts parsed Assignment objects from src/Assignment.lua
+---@return boolean ok
+---@return string | nil error
+function NodeComponent:readAssignment(input)
+    local data, err = coerceAssignment(input)
+    if not data then
+        return false, err
+    end
+
+    if type(data.jobId) ~= "string" then
+        return false, "NodeComponent:readAssignment() — assignment missing jobId"
+    end
+
+    local registry = data.registry or {}
+    local sequenceFlow = data.sequenceFlow or {}
+
+    self.schemaVersion = data.schemaVersion or 1
+    self.jobId = data.jobId
+    self.machineAddress = data.machineAddress or registryAddress(registry, "machineAddress")
+    self.transposerSides = registry.transposerSides or {}
+    self.redstoneSides = registry.redstoneSides or {}
+    self.items = sequenceFlow.items or {}
+    self.fluids = sequenceFlow.fluids or {}
+    self.steps = sequenceFlow.steps or {}
+
+    local machineAddr = registryAddress(registry, "machineAddress")
+    local transposerAddr = registryAddress(registry, "transposerAddress")
+    local interfaceAddr = registryAddress(registry, "interfaceAddress")
+    local databaseAddr = registryAddress(registry, "databaseAddress")
+    local redstoneAddr = registryAddress(registry, "redstoneAddress")
+
+    if machineAddr then
+        local _, setErr = self:setMachine(machineAddr)
+        if setErr then
+            return false, setErr
+        end
+    end
+
+    if transposerAddr then
+        local _, setErr = self:setTransposer(transposerAddr)
+        if setErr then
+            return false, setErr
+        end
+    end
+
+    if interfaceAddr then
+        local _, setErr = self:setInterface(interfaceAddr)
+        if setErr then
+            return false, setErr
+        end
+    end
+
+    if databaseAddr then
+        local _, setErr = self:setDatabase(databaseAddr)
+        if setErr then
+            return false, setErr
+        end
+    end
+
+    if redstoneAddr then
+        local _, setErr = self:setRedstone(redstoneAddr)
+        if setErr then
+            return false, setErr
+        end
+    end
+
+    return true
+end
+
+---Resolve a transposer role name to an OC side index.
+---@param role string | number
+---@return number | nil
+function NodeComponent:transposerSide(role)
+    if type(role) == "number" then
+        return role
+    end
+    if type(role) == "string" then
+        return self.transposerSides[role]
+    end
+    return nil
+end
+
+---Resolve a redstone role name to an OC side index.
+---@param role string | number
+---@return number | nil
+function NodeComponent:redstoneSide(role)
+    if type(role) == "number" then
+        return role
+    end
+    if type(role) == "string" then
+        return self.redstoneSides[role]
+    end
+    return nil
 end
 
 ---Sets the transposer component for the node.
@@ -122,9 +319,7 @@ end
 
 -- This will be used to transfer the items from the buffer to the machine --> into the bus ensure empty for both fluids and items --> done
 ---@return boolean True if the transfer was successful, false otherwise
-function NodeComponent:transferToMachine()
-    local fromSide = 1
-    local toSide = 2
+function NodeComponent:transferToMachine(fromSide, toSide)
     self.interface:clearAllConfigurations()
     self.interface:setAllConfigurations(self.database)
     self.transposer:drainInventory(fromSide, toSide)
