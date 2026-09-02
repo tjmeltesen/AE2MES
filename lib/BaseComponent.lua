@@ -1,3 +1,6 @@
+---@meta _
+---@brief API Wrapper for Base Components in OpenComputers
+---@version 1.0.0
 ---@class BaseComponent
 ---@field address string
 ---@field slot integer
@@ -24,6 +27,10 @@ end
 
 function BaseComponent:getAddress()
     return self.address
+end
+
+function BaseComponent:getType()
+    return component.type(self.address)
 end
 
 function BaseComponent:getProxy()

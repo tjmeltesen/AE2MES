@@ -1,10 +1,28 @@
+---@meta _
+---@brief API Wrapper for database component in OpenComputers Applied Energistics 2
+---@version 1.0.0
+---@class DatabaseComponent: BaseComponent
+---@field size integer
+---@field address string
+
+
 local BaseComponent = require("BaseComponent")
 
-local DatabaseComponent = setmetatable({}, BaseComponent)
+local DatabaseComponent = setmetatable({}, { __index = BaseComponent })
 DatabaseComponent.__index = DatabaseComponent
 
-function DatabaseComponent:new(address)
-    return BaseComponent.new(self, address)
+---Creates a new DatabaseComponent instance with the specified size (number of slots,type).
+---@param address string # The address of the database component.
+---@param size integer | nil # The size of the database. If nil, it will be inferred as base size of 9.
+---@return DatabaseComponent | nil, string | nil # A new instance of DatabaseComponent. Will return nil and an error message if the address is invalid.
+function DatabaseComponent:new(address, size)
+    local self, err = BaseComponent.new(self, address)
+    if not self then
+        return nil, err
+    end
+    self.size = size
+
+    return self
 end
 
 
@@ -62,6 +80,28 @@ end
 ---@return boolean # True if something was overwritten.
 function DatabaseComponent:copy(fromSlot, toSlot, dbAddress) 
     return self:call("copy", fromSlot, toSlot, dbAddress)
+end
+
+--- Gets the size of the database.
+---@return integer # The size of the database. Default 9 if not set.
+function DatabaseComponent:getSize()
+    if self.size then
+        return self.size 
+    else
+        return 9 -- Default min size if not set
+    end
+end
+
+--- Clears all slots in the database. Returns true if any slot was cleared. (0 index or 1 index not sure yet.)
+---@return boolean # True if any slot was cleared.
+function DatabaseComponent:clearAll()
+    local clearedAny = false
+    for i = 1, self:getSize() do
+        if self:clear(i) then
+            clearedAny = true
+        end
+    end
+    return clearedAny
 end
 
 return DatabaseComponent
