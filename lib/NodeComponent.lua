@@ -33,6 +33,9 @@ function NodeComponent:new(transposerObj, interfaceObj, machineObj, databaseObj,
     return self
 end
 
+---Sets the transposer component for the node.
+---@param transposerAddr string # The address of the transposer component.
+---@return TransposerComponent | nil, string | nil # The transposer component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setTransposer(transposerAddr)
     self.transposer = TransposerComponent:new(transposerAddr)
     if not self.transposer then
@@ -41,6 +44,9 @@ function NodeComponent:setTransposer(transposerAddr)
     return self.transposer
 end
 
+---Sets the interface component for the node.
+---@param interfaceAddr string # The address of the interface component.
+---@return Interface | nil, string | nil # The interface component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setInterface(interfaceAddr)
     self.interface = Interface:new(interfaceAddr)
     if not self.interface then
@@ -49,6 +55,9 @@ function NodeComponent:setInterface(interfaceAddr)
     return self.interface
 end
 
+---Sets the machine component for the node.
+---@param machineAddr string # The address of the machine component.
+---@return Machine | nil, string | nil # The machine component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setMachine(machineAddr)
     self.machine = Machine:new(machineAddr)
     if not self.machine then
@@ -57,6 +66,9 @@ function NodeComponent:setMachine(machineAddr)
     return self.machine
 end
 
+---Sets the database component for the node.
+---@param databaseAddr string # The address of the database component.
+---@return DatabaseComponent | nil, string | nil # The database component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setDatabase(databaseAddr)
     self.database = DatabaseComponent:new(databaseAddr)
     if not self.database then
@@ -65,6 +77,9 @@ function NodeComponent:setDatabase(databaseAddr)
     return self.database
 end
 
+---Sets the redstone component for the node.
+---@param redstoneAddr string # The address of the redstone component.
+---@return RedstoneComponent | nil, string | nil # The redstone component object. Will return nil and an error message if the address is invalid.
 function NodeComponent:setRedstone(redstoneAddr)
     self.redstone = RedstoneComponent:new(redstoneAddr)
     if not self.redstone then
@@ -73,22 +88,32 @@ function NodeComponent:setRedstone(redstoneAddr)
     return self.redstone
 end
 
+---Gets the transposer component for the node.
+---@return TransposerComponent | nil # The transposer component object.
 function NodeComponent:getTransposer()
     return self.transposer
 end
 
+---Gets the interface component for the node.
+---@return Interface | nil # The interface component object.
 function NodeComponent:getInterface()
     return self.interface
 end
 
+---Gets the machine component for the node.
+---@return Machine | nil # The machine component object.
 function NodeComponent:getMachine()
     return self.machine
 end
 
+---Gets the database component for the node.
+---@return DatabaseComponent | nil # The database component object.
 function NodeComponent:getDatabase()
     return self.database
 end
 
+---Gets the redstone component for the node.
+---@return RedstoneComponent | nil # The redstone component object.
 function NodeComponent:getRedstone()
     return self.redstone
 end
