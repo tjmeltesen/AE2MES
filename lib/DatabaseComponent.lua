@@ -13,12 +13,15 @@ DatabaseComponent.__index = DatabaseComponent
 
 ---Creates a new DatabaseComponent instance with the specified size (number of slots,type).
 ---@param address string # The address of the database component.
----@param size integer | nil # The size of the database. If nil, it will be inferred as base size of 9.
+---@param size integer # The size of the database. If nil, it will be inferred as base size of 9.
 ---@return DatabaseComponent | nil, string | nil # A new instance of DatabaseComponent. Will return nil and an error message if the address is invalid.
 function DatabaseComponent:new(address, size)
     local self, err = BaseComponent.new(self, address)
     if not self then
         return nil, err
+    end
+    if size == nil then
+        size = 9
     end
     self.size = size
 
@@ -85,11 +88,7 @@ end
 --- Gets the size of the database.
 ---@return integer # The size of the database. Default 9 if not set.
 function DatabaseComponent:getSize()
-    if self.size then
-        return self.size 
-    else
-        return 9 -- Default min size if not set
-    end
+    return self.size
 end
 
 --- Clears all slots in the database. Returns true if any slot was cleared. (0 index or 1 index not sure yet.)

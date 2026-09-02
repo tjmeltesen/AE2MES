@@ -42,6 +42,28 @@ local function cloneTable(value)
     return copy
 end
 
+local function resolveType(address)
+    if type(address) ~= "string" then
+        return nil
+    end
+    if address:find("^me%-") or address:find("^me_") then
+        return "me_controller"
+    end
+    if address:find("^trans") or address:find("^transposer") then
+        return "transposer"
+    end
+    if address:find("^db%-") or address:find("^database") then
+        return "database"
+    end
+    if address:find("^iface") then
+        return "me_interface"
+    end
+    if address:find("^machine") or state.machines[address] then
+        return "gt_machine"
+    end
+    return "gt_machine"
+end
+
 local function buildProxy(address)
     local mock = state.machines[address] or { active = false, hasWork = false }
     local override = state.proxyOverrides[address] or {}
@@ -113,6 +135,9 @@ end
 
 local function installGlobals()
     _G.component = {
+        doc = function(_, methodName)
+            return "mock doc for " .. tostring(methodName)
+        end,
         list = function(filter)
             local machines = { "machine-lathe", "machine-assembler" }
             local index = 0
@@ -123,10 +148,34 @@ local function installGlobals()
                 end
             end
         end,
+        methods = function(address)
+            return {
+                getName = false,
+                getStoredEU = false,
+            }
+        end,
         proxy = function(address)
             return buildProxy(address)
         end,
-        isAvailable = function(_) return true end,
+        type = function(address)
+            return resolveType(address)
+        end,
+        slot = function(_)
+            return -1
+        end,
+        get = function(address, type)
+            if resolveType(address) then
+                return address
+            end
+            return nil, "component not found"
+        end,
+        isAvailable = function(type)
+            return type == "gt_machine" or type == "me_controller" or type == "transposer"
+        end,
+        getPrimary = function(type)
+            return buildProxy("machine-lathe")
+        end,
+        setPrimary = function() end,
         invoke = function(address, method, ...)
             local proxy = buildProxy(address)
             if not proxy or type(proxy[method]) ~= "function" then
@@ -234,8 +283,8 @@ end
 
 function mock_oc.override_component_proxy(factoryFn)
     local oldProxy = _G.component.proxy
-    _G.component.proxy = function(address)
-        local proxy = oldProxy(address)
+    _G.component.proxy = function(address, type)
+        local proxy = oldProxy(address, type)
         return factoryFn(address, proxy) or proxy
     end
     package.loaded["component"] = _G.component

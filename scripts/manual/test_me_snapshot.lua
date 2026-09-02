@@ -66,9 +66,9 @@ local function printWrapper(controller)
     local formatted = NetworkItems.formatItems(raw)
     print(" formatItems count:", #formatted)
 
-    local snap, err = controller:getBufferSnapshot()
+    local snap, err = controller:getSnapshot()
     if not snap then
-        print(" getBufferSnapshot FAIL:", err)
+        print(" getSnapshot FAIL:", err)
         return false
     end
 
@@ -77,7 +77,7 @@ local function printWrapper(controller)
 end
 
 local function printSnapshot(snap)
-    printHeader("MeControllerComponent:getBufferSnapshot()")
+    printHeader("MeControllerComponent:getSnapshot()")
 
     if #snap.items == 0 then
         print(" (no items in snapshot)")

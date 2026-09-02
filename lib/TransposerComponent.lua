@@ -1,5 +1,6 @@
 ---@meta _
 ---@brief API Wrapper for Transposer component in OpenComputers for GTNH
+---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/transposer.lua
 ---@version 1.0.0
 ---@class TransposerComponent : BaseComponent
 ---@field address string
@@ -22,6 +23,53 @@ function TransposerComponent:new(address)
 end
 
 
+---============================================================
+--- Base Transposer API Functions 
+---============================================================
+
+--- Transfer items between two adjacent inventories via transposer.
+---@param fromSide number
+---@param toSide number
+---@param count number|nil
+---@param fromSlot number|nil
+---@param toSlot number|nil
+---@return number|nil moved, string|nil error
+function TransposerComponent:transferItem(fromSide, toSide, count, fromSlot, toSlot)
+    return self:call(
+        "transferItem",
+        fromSide,
+        toSide,
+        count,
+        fromSlot,
+        toSlot
+    )
+end
+
+---Get the number of slots in the inventory on a specific side.
+---@param side integer # The side of the device.
+---@return integer # The number of slots in the inventory.
+function TransposerComponent:getInventorySize(side)
+    return self:call("getInventorySize", side)
+end
+
+--- Get stack metadata for every occupied slot on a side.
+--- @param side number
+--- @return table|nil stacks
+function TransposerComponent:getAllStacks(side)
+    return self:call("getAllStacks", side)
+end
+
+---Get the name of the inventory on a specific side.
+---@param side integer # The side of the device.
+---@return string # The name of the inventory.
+function TransposerComponent:getInventoryName(side)
+    return self:call("getInventoryName", side)
+end
+
+
+---============================================================
+--- Custom Transposer Functions
+---============================================================
 
 --- Normalize getAllStacks() output to a plain array of item stacks.
 -- OC may return an array directly, a stack-slot object with getAll(), or an iterator.
@@ -48,44 +96,6 @@ local function normalizeStacks(raw)
     end
 
     return nil
-end
-
---- Transfer items between two adjacent inventories via transposer.
----@param fromSide number
----@param toSide number
----@param count number|nil
----@param fromSlot number|nil
----@param toSlot number|nil
----@return number|nil moved, string|nil error
-function TransposerComponent:transferItem(fromSide, toSide, count, fromSlot, toSlot)
-    return self:call(
-        "transferItem",
-        fromSide,
-        toSide,
-        count,
-        fromSlot,
-        toSlot
-    )
-end
-
-
-function TransposerComponent:getInventorySize(side)
-    return self:call("getInventorySize", side)
-end
-
---- Get stack metadata for every occupied slot on a side.
---- @param side number
---- @return table|nil stacks
-function TransposerComponent:getAllStacks(side)
-    return self:call("getAllStacks", side)
-end
-
-function TransposerComponent:getStackInSlot(side, slot)
-    return self:call("getStackInSlot", side, slot)
-end
-
-function TransposerComponent:getSlotStackSize(side, slot)
-    return self:call("getSlotStackSize", side, slot)
 end
 
 --- Snapshot all non-empty stacks on a side using getAllStacks.
@@ -144,7 +154,7 @@ function TransposerComponent:drainInventory(fromSide, toSide)
 
     for _, stack in ipairs(stacks) do
         if stack and stack.size and stack.size > 0 then
-            local moved, moveErr = self:transferItem(fromSide, toSide)
+            local moved, moveErr = self:transferItem(fromSide, toSide, stack.size)
             if moved == nil then
                 return total > 0 and total or nil, moveErr
             end
@@ -159,59 +169,7 @@ function TransposerComponent:drainInventory(fromSide, toSide)
     return total
 end
 
-function TransposerComponent:getTankCount(side)
-    return self:call("getTankCount", side)
-end
 
-function TransposerComponent:getFluidInTank(side, tank)
-    return self:call("getFluidInTank", side, tank)
-end
-
----Get the name of the inventory on a specific side.
----@param side integer # The side of the device.
----@return string # The name of the inventory.
-function TransposerComponent:getInventoryName(side)
-    return self:call("getInventoryName", side)
-end
-
-
-function TransposerComponent:getTankLevel(side, tank)
-    return self:call("getTankLevel", side, tank)
-end
-
-function TransposerComponent:getTankCapacity(side, tank)
-    return self:call("getTankCapacity", side, tank)
-end
-
-function TransposerComponent:getTankContents(side)
-    local count, err = self:getTankCount(side)
-
-    if not count then
-        return nil, err
-    end
-
-    local contents = {}
-
-    for tank = 1, count do
-        local fluid = self:getFluidInTank(side, tank)
-        local level = self:getTankLevel(side, tank)
-        local capacity = self:getTankCapacity(side, tank)
-
-        table.insert(contents, {
-            tank = tank,
-            label = fluid and fluid.label or nil,
-            amount = level or 0,
-            capacity = capacity or 0,
-            has = fluid ~= nil,
-        })
-
-        if os.sleep then
-            os.sleep(0)
-        end
-    end
-
-    return contents
-end
 
 ---Discovers what inventories are on the sides of the transposer for easy mapping, returns a table containing: side,
 ---side_name, container_name, and slots. Only returns sides that have an inventory.

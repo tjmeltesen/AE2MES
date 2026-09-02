@@ -1,41 +1,24 @@
+---@meta _
+---@brief API Wrapper for Machine component in OpenComputers for GTNH
+---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/gt-machine.lua
+---@version 1.0.0
 ---@class Machine : BaseComponent
----@function getStoredEUString fun(self: Machine): string | nil, string
----@function getEUInputAverage fun(self: Machine): number | nil, string
----@function getOutputVoltage fun(self: Machine): number | nil, string
----@function getName fun(self: Machine): string | nil, string
----@function isMachineActive fun(self: Machine): boolean
----@function getEUStored fun(self: Machine): number
----@function getEUCapacity fun(self: Machine): number
----@function getSteamStored fun(self: Machine): number
----@function getSensorInformation fun(self: Machine): string[]
----@function getEUOutputAverage fun(self: Machine): number
----@function getEUCapacityString fun(self: Machine): string
----@function getCoordinates fun(self: Machine): {number, number, number}
----@function getAverageElectricInput fun(self: Machine): number
----@function getInputVoltage fun(self: Machine): number
----@function getOutputAmperage fun(self: Machine): number
----@function setWorkAllowed fun(self: Machine, enabled: boolean): number
----@function getOwnerName fun(self: Machine): string
----@function hasWork fun(self: Machine): boolean
----@function getStoredSteam fun(self: Machine): number
----@function getWorkProgress fun(self: Machine): number
----@function getEUMaxStored fun(self: Machine): number
----@function getAverageElectricOutput fun(self: Machine): number
----@function getStoredEU fun(self: Machine): number
----@function isWorkAllowed fun(self: Machine): boolean
----@function getWorkMaxProgress fun(self: Machine): number
----@function getSteamCapacity fun(self: Machine): number
----@function getSteamMaxStored fun(self: Machine): number
-
-
+---@field address string
 
 local BaseComponent = require("BaseComponent")
 
-local Machine = setmetatable({}, BaseComponent)
+local Machine = setmetatable({}, { __index = BaseComponent })
 Machine.__index = Machine
 
+---Creates a new Machine instance with the specified address.
+---@param address string # The address of the machine component.
+---@return Machine | nil, string | nil # A new instance of Machine. Will return nil and an error message if the address is invalid.
 function Machine:new(address)
-    return BaseComponent.new(self, address)
+    local self, err = BaseComponent.new(self, address)
+    if not self then
+        return nil, err
+    end
+    return self
 end
 
 

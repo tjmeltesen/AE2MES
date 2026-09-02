@@ -132,7 +132,7 @@ function NodeSensor:_watchBuffer()
         return
     end
 
-    local snapshot, err = controller:getBufferSnapshot()
+    local snapshot, err = controller:getSnapshot()
     if not snapshot then
         return
     end

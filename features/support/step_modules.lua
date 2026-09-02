@@ -6,6 +6,7 @@ local world = require("world")
 
 local MODULES = {
     { file = "lib/JSON.lua", module = "JSON" },
+    { file = "lib/ComponentLibrary.lua", module = "ComponentLibrary" },
     { file = "lib/BaseComponent.lua", module = "BaseComponent", isClass = true },
     { file = "lib/Machine.lua", module = "Machine", isClass = true },
     { file = "lib/DatabaseComponent.lua", module = "DatabaseComponent", isClass = true },
@@ -104,7 +105,7 @@ end)
 When("I read ME controller buffer snapshot", function()
     local MeControllerComponent = require("MeControllerComponent")
     local controller = MeControllerComponent:new("me-ctrl-test")
-    world.lastTable = controller:getBufferSnapshot()
+    world.lastTable = controller:getSnapshot()
 end)
 
 Then("buffer snapshot should have at least (%d+) items and (%d+) fluids", function(items, fluids)

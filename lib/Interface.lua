@@ -1,16 +1,17 @@
 ---@meta _
+---@brief API Wrapper for ME Interface component in OpenComputers for GTNH
+---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/me-interface.lua
+---@version 1.0.0
+---@class Interface : BaseComponent
+---@field address string
 
 local BaseComponent = require("BaseComponent")
-local NetworkItems = require("NetworkItems")
 
---- Wrapper for an ME Interface component, providing access to the ME network's
---- item/fluid contents as well as the interface's own stocking and pattern
---- configuration (via the underlying `me_interface` component API).
----@class Interface: BaseComponent
-local Interface = setmetatable({}, {__index = BaseComponent})
+
+local Interface = setmetatable({}, { __index = BaseComponent })
 Interface.__index = Interface
 
----Creates a new Interface wrapper for the component at the given address.
+---Creates a new Interface instance with the specified address.
 ---@param address string # The component address of the ME Interface.
 ---@return Interface | nil, string | nil # A new Interface instance, or nil and an error message if the address is invalid.
 function Interface:new(address)
@@ -18,41 +19,25 @@ function Interface:new(address)
     if not self then
         return nil, err
     end
+    self.MAX_SLOTS = 9
+    self.MAX_FLUID_SLOTS = 6
     return self
 end
 
----Gets the list of items currently stored in the ME network.
----@param filter? table # Optional item filter to narrow down the results.
----@return table # A list of items (and their counts) present in the network.
-function Interface:getItemsInNetwork(filter)
-    if filter ~= nil then
-        return self:callNetwork("getItemsInNetwork", filter)
-    end
-    return self:callNetwork("getItemsInNetwork")
-end
-
----Gets the list of fluids currently stored in the ME network.
----@return table # A list of fluids (and their amounts) present in the network.
-function Interface:getFluidsInNetwork()
-    return self:callNetwork("getFluidsInNetwork")
-end
-
----Gets a combined, formatted view of both the items and fluids in the network.
----@return table # The combined/formatted contents of the network, as produced by NetworkItems.formatContents.
-function Interface:getContents()
-    return NetworkItems.formatContents(
-        self:getItemsInNetwork(),
-        self:getFluidsInNetwork()
-    )
-end
+---============================================================
+--- Base Interface API Functions
+---============================================================
 
 ---Sets the item being stocked in a specific slot of the interface.
----@param slot integer # The slot index to configure.
+---@param slot integer # The slot index to configure. (0-8)
 ---@param dbAddress string # The address of a database that contains the item to stock.
 ---@param dbSlot integer # The index of the item within the database.
 ---@param count? integer # The amount of items to stock in the interface. (defaults to 1)
 ---@return boolean # Whether the configuration was applied successfully.
 function Interface:setConfiguration(slot, dbAddress, dbSlot, count)
+    if slot < 0 or slot >= self.MAX_SLOTS then
+        return nil, "Interface:setConfiguration() — invalid slot index: " .. slot
+    end
     return self:callNetwork(
         "setInterfaceConfiguration",
         slot,
@@ -96,19 +81,77 @@ function Interface:clearFluidConfiguration(side)
     )
 end
 
----Stores a single matching item/fluid from the network into a database slot.
----@param filter table # A filter describing the item/fluid to store.
----@param databaseAddress string # The address of the database to store the result in.
----@param databaseSlot integer # The index within the database to store the result at.
----@return boolean # Whether the item/fluid was stored successfully.
-function Interface:store(filter, databaseAddress, databaseSlot)
-    return self:callNetwork(
-        "store",
-        filter,
-        databaseAddress,
-        databaseSlot,
-        1
-    )
+---============================================================
+--- Custom Interface Functions
+---============================================================
+
+function Interface:clearAllConfigurations()
+    for i = 0, self.MAX_SLOTS - 1 do
+        self:clearConfiguration(i)
+    end
+    for i = 0, self.MAX_FLUID_SLOTS - 1 do
+        self:clearFluidConfiguration(i)
+    end
+end
+
+--- Sets all configurations for the interface from what is stored in the database
+---@param databaseObj DatabaseComponent # The database object to get the configurations from
+---@return boolean True if the configurations were set successfully, false otherwise
+function Interface:setAllConfigurations(databaseObj)
+    local dbAddress = databaseObj.address
+    local dbSlots = databaseObj.size
+
+    local itemSlot = 0
+    local fluidSlot = 0
+
+    for dbSlot = 1, dbSlots do
+        local itemStack = databaseObj:get(dbSlot)
+
+        if itemStack then
+            if itemStack.fluidDrop ~= nil then
+                -- Fluid configuration
+                if fluidSlot < self.MAX_FLUID_SLOTS then
+                    self:setFluidConfiguration(
+                        fluidSlot,
+                        dbAddress,
+                        dbSlot
+                    )
+
+                    fluidSlot = fluidSlot + 1
+                end
+            else
+                -- Item configuration
+                if itemSlot < self.MAX_SLOTS then
+                    self:setConfiguration(
+                        itemSlot,
+                        dbAddress,
+                        dbSlot
+                    )
+
+                    itemSlot = itemSlot + 1
+                end
+            end
+        end
+
+        -- Stop once both configuration areas are full.
+        if itemSlot >= self.MAX_SLOTS
+            and fluidSlot >= self.MAX_FLUID_SLOTS then
+            break
+        end
+    end
+
+    return true
+end
+
+--- Checks if the interface is empty (checks network for items and fluids)
+---@return boolean True if the interface is empty, false otherwise
+
+function Interface:isEmpty() 
+    local snapshot = self:getSnapshot()
+    if #snapshot.items ~= 0 or #snapshot.fluids ~= 0 then
+        return false
+    end
+    return true
 end
 
 return Interface
