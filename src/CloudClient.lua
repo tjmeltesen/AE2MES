@@ -5,6 +5,8 @@
 ---@class CloudClientConfig
 ---@field cloudBaseUrl any # Truthy value used as the URL prefix without type validation.
 ---@field nodeId any # Truthy value used as the node identifier without type validation.
+---@field useMockAssignment boolean|nil
+---@field mockAssignmentPath string|nil
 ---
 ---@class CloudClient
 ---@field _config CloudClientConfig # Node and cloud endpoint configuration, retained by reference.
@@ -44,6 +46,60 @@ function CloudClient:_nodeId()
     return self._config.nodeId or "unknown-node"
 end
 
+function CloudClient:_mockEnabled()
+    return self._config.useMockAssignment == true
+end
+
+function CloudClient:_mockAssignmentPath()
+    local path = self._config.mockAssignmentPath
+    if type(path) == "string" and path ~= "" then
+        return path
+    end
+    return "fixtures/mock_assignment.json"
+end
+
+function CloudClient:_readMockAssignmentFile()
+    local path = self:_mockAssignmentPath()
+    local file, openErr = io.open(path, "r")
+    if not file then
+        return nil, "CloudClient:_readMockAssignmentFile() — failed to open "
+            .. tostring(path) .. ": " .. tostring(openErr)
+    end
+    local body = file:read("*a")
+    file:close()
+    if type(body) ~= "string" or body == "" then
+        return nil, "CloudClient:_readMockAssignmentFile() — empty file: " .. tostring(path)
+    end
+    return body
+end
+
+---Copy request.buffer materials onto assignment sequenceFlow (size → count for items).
+function CloudClient:_applyBufferToAssignmentData(data, buffer)
+    data.sequenceFlow = data.sequenceFlow or {}
+    local items = {}
+    local fluids = {}
+
+    for _, item in ipairs((buffer and buffer.items) or {}) do
+        table.insert(items, {
+            name = item.name,
+            label = item.label,
+            count = item.count or item.size or 0,
+        })
+    end
+
+    for _, fluid in ipairs((buffer and buffer.fluids) or {}) do
+        table.insert(fluids, {
+            name = fluid.name,
+            label = fluid.label,
+            amount = fluid.amount or 0,
+        })
+    end
+
+    data.sequenceFlow.items = items
+    data.sequenceFlow.fluids = fluids
+    return data
+end
+
 ---Submit current node demand and availability for cloud scheduling.
 ---Overwrites `request.nodeId`, performs an HTTP POST, and parses the response as
 ---an assignment envelope or single assignment. Transport and parse failures are returned.
@@ -56,6 +112,28 @@ function CloudClient:submitJobRequest(request)
     end
 
     request.nodeId = self:_nodeId()
+
+    if self:_mockEnabled() then
+        local body, readErr = self:_readMockAssignmentFile()
+        if not body then
+            return nil, readErr
+        end
+
+        local ok, data = pcall(JSON.decode, JSON, body)
+        if not ok or type(data) ~= "table" then
+            return nil, "CloudClient:submitJobRequest() — mock JSON decode failed: " .. tostring(data)
+        end
+
+        if type(data.assignments) == "table" then
+            for _, entry in ipairs(data.assignments) do
+                self:_applyBufferToAssignmentData(entry, request.buffer)
+            end
+        else
+            self:_applyBufferToAssignmentData(data, request.buffer)
+        end
+
+        return Assignment.listFromJSON(JSON:encode(data))
+    end
 
     local url = self:_baseUrl() .. "/nodes/" .. self:_nodeId() .. "/jobs/request"
     local body, err = self._comms:requestJSONPost(url, request)
@@ -77,6 +155,21 @@ function CloudClient:pollAssignment(jobId)
         return nil, "CloudClient:pollAssignment() — invalid jobId"
     end
 
+    if self:_mockEnabled() then
+        local body, readErr = self:_readMockAssignmentFile()
+        if not body then
+            return nil, readErr
+        end
+        local assignment, err = Assignment.fromJSON(body)
+        if not assignment then
+            return nil, err
+        end
+        if assignment:id() ~= jobId then
+            return nil, "CloudClient:pollAssignment() — mock fixture jobId mismatch"
+        end
+        return assignment
+    end
+
     local url = self:_baseUrl() .. "/jobs/" .. jobId
     local body, err = self._comms:requestJSON(url)
     if not body then
@@ -95,6 +188,16 @@ end
 function CloudClient:reportStatus(activeJobsSnapshot)
     if type(activeJobsSnapshot) ~= "table" then
         return false, "CloudClient:reportStatus() — expected snapshot table"
+    end
+
+    if self:_mockEnabled() then
+        local count = 0
+        for _ in pairs(activeJobsSnapshot) do
+            count = count + 1
+        end
+        print(string.format("[CloudClient:mock] status node=%s activeJobs=%s",
+            tostring(self:_nodeId()), tostring(count)))
+        return true
     end
 
     local url = self:_baseUrl() .. "/nodes/" .. self:_nodeId() .. "/status"
@@ -120,6 +223,13 @@ end
 function CloudClient:reportCompletion(jobId, result)
     if type(jobId) ~= "string" or jobId == "" then
         return false, "CloudClient:reportCompletion() — invalid jobId"
+    end
+
+    if self:_mockEnabled() then
+        local okFlag = type(result) == "table" and result.success
+        print(string.format("[CloudClient:mock] completion jobId=%s success=%s",
+            tostring(jobId), tostring(okFlag)))
+        return true
     end
 
     local url = self:_baseUrl() .. "/jobs/" .. jobId .. "/complete"

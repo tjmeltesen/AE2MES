@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "jobId": "job-mock-001",
+  "machineAddress": "REPLACE_MACHINE_ADDRESS",
+  "registry": {
+    "machineAddress": "REPLACE_MACHINE_ADDRESS",
+    "transposerAddress": "REPLACE_TRANSPOSER_ADDRESS",
+    "interfaceAddress": "REPLACE_INTERFACE_ADDRESS",
+    "databaseAddress": "REPLACE_DATABASE_ADDRESS",
+    "redstoneAddress": "REPLACE_REDSTONE_ADDRESS",
+    "databaseSize": 9,
+    "transposerSides": {
+      "pull": 5,
+      "input": 0,
+      "returnSide": 2
+    },
+    "redstoneSides": {
+      "start": 0,
+      "stop": 1
+    }
+  },
+  "sequenceFlow": {
+    "items": [],
+    "fluids": [],
+    "steps": [
+      { "method": "transferToMachine", "params": {} },
+      { "method": "waitForProcess", "params": { "timeout": 600 } }
+    ]
+  }
+}

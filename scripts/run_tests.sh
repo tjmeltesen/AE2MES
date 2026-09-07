@@ -10,4 +10,6 @@ if ! command -v busted >/dev/null 2>&1; then
   exit 1
 fi
 
+lua spec/job_pool_unit.lua
+lua spec/cloud_client_mock_unit.lua
 busted "$@"
