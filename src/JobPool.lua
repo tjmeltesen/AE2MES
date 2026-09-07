@@ -1,115 +1,434 @@
+---@meta _
+---@brief Parses, queues, advances, and reports assignment runs on a shared runtime thread.
+---@version 1.0.0
+---
+---@class JobResult
+---@field jobId string
+---@field machineAddress string
+---@field success boolean
+---@field durationSeconds number
+---@field itemsProcessed table[]
+---@field error string | nil
+---
+---@class JobRun
+---@field jobId string
+---@field machineAddress string
+---@field assignment Assignment
+---@field node NodeComponent | nil
+---@field stepIndex integer
+---@field state string # `"ACTIVE"`, `"DONE"`, or `"FAULTED"`.
+---@field startedAt number
+---@field completedAt number | nil
+---@field stepStartedAt number | nil
+---@field waitTicks number | nil
+---@field error any
+---@field result JobResult | nil
+---
+---@class JobSnapshot
+---@field jobId string
+---@field machineAddress string
+---@field phase string
+---@field stepIndex integer
+---@field startedAt integer
+---
 ---@class JobPool
+---@field _runs table<string, JobRun> # Runs retained until explicitly removed.
+---@field _pending Assignment | nil # Single assignment waiting for its selected machine.
+---@field _clock fun(): number # Time source used for run timing and process timeouts.
 
-local HardwareContext = require("HardwareContext")
-local Executor = require("Executor")
+local Assignment = require("Assignment")
+local NodeComponent = require("NodeComponent")
 
 local JobPool = {}
 JobPool.__index = JobPool
 
-function JobPool.new(cache)
+---Shallow-copy each item record in an array.
+---Nested values remain shared, non-array keys are omitted, and malformed item entries may raise an error.
+---@param items table[] | nil # Item array to copy; nil is treated as empty.
+---@return table[] # New item array containing new top-level item tables.
+local function copyItems(items)
+    local copy = {}
+    for index, item in ipairs(items or {}) do
+        local itemCopy = {}
+        for key, value in pairs(item) do
+            itemCopy[key] = value
+        end
+        copy[index] = itemCopy
+    end
+    return copy
+end
+
+---Create an empty job pool using `os.time` as its clock.
+---@return JobPool # New pool with no active, terminal, or pending assignments.
+function JobPool.new()
     local self = setmetatable({}, JobPool)
-    self._cache = cache
     self._runs = {}
+    self._pending = nil
+    self._clock = os.time
     return self
 end
 
-function JobPool:spawn(assignment)
+---Normalize JSON, raw-table, or Assignment-like input into an Assignment object.
+---Assignment accessor errors propagate; validation failures are returned with JobPool context.
+---@param input any # JSON text, raw assignment data, or object exposing assignment methods.
+---@return Assignment | nil assignment # Valid assignment with string job and machine identifiers.
+---@return string | nil error # Parse or required-field validation error.
+function JobPool:parseAssignment(input)
+    local assignment
+    local err
+
+    if type(input) == "string" then
+        assignment, err = Assignment.fromJSON(input)
+    elseif type(input) == "table" and type(input.id) == "function" then
+        assignment = input
+    elseif type(input) == "table" then
+        assignment, err = Assignment.fromTable(input)
+    else
+        err = "expected JSON string or assignment table"
+    end
+
     if not assignment then
-        return false, "JobPool:spawn() — missing assignment"
+        return nil, "JobPool:parseAssignment() — " .. tostring(err)
+    end
+    if type(assignment.id) ~= "function" or type(assignment:id()) ~= "string" then
+        return nil, "JobPool:parseAssignment() — assignment missing jobId"
+    end
+    if type(assignment.machineAddress) ~= "function"
+        or type(assignment:machineAddress()) ~= "string" then
+        return nil, "JobPool:parseAssignment() — assignment missing machineAddress"
     end
 
-    local jobId = assignment:id()
-    local machineAddress = assignment:machineAddress()
+    return assignment
+end
 
-    if self._runs[jobId] then
-        return false, "JobPool:spawn() — job already active: " .. jobId
+---Construct and initialize a NodeComponent for an assignment.
+---Component discovery and hardware wiring occur in `NodeComponent:configureFromRegistry`.
+---@param assignment Assignment # Parsed assignment used to configure the node.
+---@return NodeComponent | nil node # Initialized node, or nil when construction or wiring fails.
+---@return string | nil error # Node construction or registry wiring error.
+function JobPool:createNode(assignment)
+    local node = NodeComponent:new()
+    if not node then
+        return nil, "JobPool:createNode() — failed to create NodeComponent"
     end
 
-    if self:isMachineBusy(machineAddress) then
-        return false, "JobPool:spawn() — machine busy: " .. tostring(machineAddress)
-    end
-
-    local hardwareContext, hwErr = HardwareContext.fromRegistry(assignment:registry(), self._cache)
-    if not hardwareContext then
-        return false, hwErr
-    end
-
-    local executor = Executor.new(self._cache)
-    local ok, beginErr = executor:begin(
-        hardwareContext,
-        assignment:sequenceFlow(),
-        jobId,
-        machineAddress
-    )
-
+    local ok, err = node:configureFromRegistry(assignment:registry())
     if not ok then
-        return false, beginErr
+        return nil, err or "JobPool:createNode() — failed to configure assignment registry"
     end
 
-    self._runs[jobId] = {
-        jobId = jobId,
-        machineAddress = machineAddress,
-        executor = executor,
-        hardwareContext = hardwareContext,
+    return node
+end
+
+---Build an active run record and its initialized node.
+---The run start time comes from the pool's replaceable clock.
+---@param assignment Assignment # Parsed assignment to run.
+---@return JobRun | nil run # New, not-yet-stored run record.
+---@return string | nil error # Node creation or assignment wiring error.
+function JobPool:createRun(assignment)
+    local node, err = self:createNode(assignment)
+    if not node then
+        return nil, err
+    end
+
+    return {
+        jobId = assignment:id(),
+        machineAddress = assignment:machineAddress(),
         assignment = assignment,
-        startedAt = os.time(),
+        node = node,
+        stepIndex = 1,
+        state = "ACTIVE",
+        startedAt = self._clock(),
     }
-
-    return true
 end
 
-function JobPool:tick()
-    local done = {}
-    local faulted = {}
-
-    for jobId, run in pairs(self._runs) do
-        run.executor:tick()
-
-        if run.executor:phase() == Executor.PHASE.DONE then
-            table.insert(done, jobId)
-        elseif run.executor:phase() == Executor.PHASE.FAULTED then
-            table.insert(faulted, jobId)
-        end
-    end
-
-    return done, faulted
-end
-
-function JobPool:remove(jobId)
-    self._runs[jobId] = nil
-end
-
-function JobPool:get(jobId)
-    return self._runs[jobId]
-end
-
-function JobPool:activeCount()
-    local count = 0
-    for _ in pairs(self._runs) do
-        count = count + 1
-    end
-    return count
-end
-
-function JobPool:busyMachines()
-    local machines = {}
-
+---Check whether a machine address currently has an active run.
+---@param machineAddress string # Machine address to search for.
+---@return boolean # True when an `"ACTIVE"` run uses the address.
+function JobPool:isMachineActive(machineAddress)
     for _, run in pairs(self._runs) do
-        table.insert(machines, run.machineAddress)
-    end
-
-    return machines
-end
-
-function JobPool:isMachineBusy(machineAddress)
-    for _, run in pairs(self._runs) do
-        if run.machineAddress == machineAddress then
+        if run.machineAddress == machineAddress and run.state == "ACTIVE" then
             return true
         end
     end
     return false
 end
 
+---Check whether the pool's single pending slot is occupied.
+---@return boolean # True when an assignment is waiting to start.
+function JobPool:hasPending()
+    return self._pending ~= nil
+end
+
+---Check whether any terminal run still awaits removal after cloud reporting.
+---@return boolean # True when a run is `"DONE"` or `"FAULTED"`.
+function JobPool:hasUnreported()
+    for _, run in pairs(self._runs) do
+        if run.state == "DONE" or run.state == "FAULTED" then
+            return true
+        end
+    end
+    return false
+end
+
+---Start a parsed assignment and store its run by jobId.
+---If node creation fails, stores a faulted run and completion result for later reporting.
+---@param assignment Assignment # Valid assignment to start.
+---@return boolean ok # True when an active run was created.
+---@return string | nil error # Node creation or assignment wiring error.
+function JobPool:startAssignment(assignment)
+    local run, err = self:createRun(assignment)
+    if not run then
+        run = {
+            jobId = assignment:id(),
+            machineAddress = assignment:machineAddress(),
+            assignment = assignment,
+            stepIndex = 1,
+            state = "ACTIVE",
+            startedAt = self._clock(),
+        }
+        self._runs[run.jobId] = run
+        self:finishRun(run, false, err)
+        return false, err
+    end
+
+    self._runs[run.jobId] = run
+    return true
+end
+
+---Parse and submit an assignment to the pool.
+---Rejects duplicate jobIds and a full pending slot. If the selected machine is
+---active, stores the assignment in the one-element pending slot; otherwise starts it now.
+---@param input any # JSON text, raw assignment data, or Assignment-like object.
+---@return boolean accepted # True when started or queued; false when rejected or startup faults.
+---@return string | nil error # Parse, duplicate, capacity, or node creation error.
+function JobPool:submit(input)
+    local assignment, err = self:parseAssignment(input)
+    if not assignment then
+        return false, err
+    end
+
+    local jobId = assignment:id()
+    if self._runs[jobId] then
+        return false, "JobPool:submit() — job already active: " .. jobId
+    end
+    if self._pending then
+        return false, "JobPool:submit() — pending assignment slot is full"
+    end
+    if self:isMachineActive(assignment:machineAddress()) then
+        self._pending = assignment
+        return true
+    end
+
+    return self:startAssignment(assignment)
+end
+
+---Submit an assignment using the pool's compatibility alias.
+---@param input any # Input accepted by `submit`.
+---@return boolean accepted # True when started or queued.
+---@return string | nil error # Error returned by `submit`.
+function JobPool:spawn(input)
+    return self:submit(input)
+end
+
+---Start the pending assignment when its machine is free.
+---Returns false without an error while the machine remains active. A startup failure
+---clears the pending slot but leaves the generated faulted run stored for reporting.
+---@return boolean started # True when no assignment is pending or the pending run starts.
+---@return string | nil error # Node creation or assignment wiring error.
+function JobPool:startPending()
+    if not self._pending then
+        return true
+    end
+    if self:isMachineActive(self._pending:machineAddress()) then
+        return false
+    end
+
+    local assignment = self._pending
+    local ok, err = self:startAssignment(assignment)
+    if not ok then
+        self._pending = nil
+        return false, err
+    end
+
+    self._pending = nil
+    return true
+end
+
+---Mark a run terminal and build its cloud completion result.
+---Mutates and timestamps the supplied run. Truthy `ok` selects `"DONE"` and copies
+---requested items, while only literal true sets `result.success`; falsey values fault
+---the run. Malformed assignment flow data may raise an error.
+---@param run JobRun # Stored run to finish.
+---@param ok any # Truthy marks the run done; only literal true sets `result.success` true.
+---@param err any # Optional failure detail converted to text for a faulted result.
+---@return nil
+function JobPool:finishRun(run, ok, err)
+    run.state = ok and "DONE" or "FAULTED"
+    run.error = err
+    run.completedAt = self._clock()
+    run.result = {
+        jobId = run.jobId,
+        machineAddress = run.machineAddress,
+        success = ok == true,
+        durationSeconds = math.max(0, run.completedAt - run.startedAt),
+        itemsProcessed = ok and copyItems(run.assignment:sequenceFlow().items) or {},
+    }
+    if not ok then
+        run.result.error = tostring(err or "job failed")
+    end
+end
+
+---Advance one active run by at most one assignment step.
+---Transfer and machine-completion calls are protected with `pcall`; failures fault the run.
+---Process steps poll without sleeping, while wait steps count pool ticks.
+---@param run JobRun # Active run record to mutate.
+---@return nil
+function JobPool:tickRun(run)
+    local flow = run.assignment:sequenceFlow()
+    local step = flow:stepAt(run.stepIndex)
+    if not step then
+        self:finishRun(run, true)
+        return
+    end
+
+    local method = step.method or step.type
+    local params = step.params or {}
+
+    if method == "transferToMachine" or method == "transfer" then
+        local callOk, transferred = pcall(
+            run.node.transferToMachine,
+            run.node,
+            params.fromSide,
+            params.toSide,
+            params
+        )
+        if not callOk or transferred ~= true then
+            self:finishRun(run, false, callOk and "transfer failed" or tostring(transferred))
+            return
+        end
+        run.stepIndex = run.stepIndex + 1
+        run.stepStartedAt = nil
+    elseif method == "waitForProcess" or method == "process" then
+        run.stepStartedAt = run.stepStartedAt or self._clock()
+        local callOk, done = pcall(run.node.isDone, run.node)
+        if not callOk then
+            self:finishRun(run, false, tostring(done))
+            return
+        end
+        if done then
+            run.stepIndex = run.stepIndex + 1
+            run.stepStartedAt = nil
+        else
+            local timeout = tonumber(params.timeout) or 600
+            if timeout >= 0 and self._clock() - run.stepStartedAt >= timeout then
+                self:finishRun(run, false, "process timeout")
+            end
+            return
+        end
+    elseif method == "wait" then
+        local ticks = math.max(1, tonumber(params.ticks) or 1)
+        run.waitTicks = (run.waitTicks or 0) + 1
+        if run.waitTicks < ticks then
+            return
+        end
+        run.waitTicks = nil
+        run.stepIndex = run.stepIndex + 1
+    else
+        self:finishRun(run, false, "unsupported assignment step: " .. tostring(method))
+        return
+    end
+
+    if run.stepIndex > flow:stepCount() then
+        self:finishRun(run, true)
+    end
+end
+
+---Advance all active runs once and attempt to start the pending assignment.
+---Terminal jobIds are returned on every tick until their runs are removed. A pending
+---run started or faulted at the end of this call appears in a later tick's result lists.
+---@return string[] done # JobIds currently in the `"DONE"` state.
+---@return string[] faulted # JobIds currently in the `"FAULTED"` state.
+function JobPool:tick()
+    local done = {}
+    local faulted = {}
+
+    for jobId, run in pairs(self._runs) do
+        if run.state == "ACTIVE" then
+            self:tickRun(run)
+        end
+
+        if run.state == "DONE" then
+            done[#done + 1] = jobId
+        elseif run.state == "FAULTED" then
+            faulted[#faulted + 1] = jobId
+        end
+    end
+
+    self:startPending()
+    return done, faulted
+end
+
+---Remove a run without changing or reporting it.
+---@param jobId string # Stored job identifier.
+---@return nil
+function JobPool:remove(jobId)
+    self._runs[jobId] = nil
+end
+
+---Look up a stored run.
+---@param jobId string # Job identifier to find.
+---@return JobRun | nil # Active or terminal run, or nil when absent.
+function JobPool:get(jobId)
+    return self._runs[jobId]
+end
+
+---Return a stored run's completion result.
+---@param jobId string # Job identifier to find.
+---@return JobResult | nil # Result for a terminal run, or nil when absent or still active.
+function JobPool:getResult(jobId)
+    local run = self._runs[jobId]
+    return run and run.result or nil
+end
+
+---Count runs currently in the active state.
+---@return integer # Number of `"ACTIVE"` runs.
+function JobPool:activeCount()
+    local count = 0
+    for _, run in pairs(self._runs) do
+        if run.state == "ACTIVE" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+---Collect machine addresses used by active runs.
+---Iteration order follows Lua table traversal and is not stable.
+---@return string[] # Machine address for each active run.
+function JobPool:busyMachines()
+    local machines = {}
+
+    for _, run in pairs(self._runs) do
+        if run.state == "ACTIVE" then
+            table.insert(machines, run.machineAddress)
+        end
+    end
+
+    return machines
+end
+
+---Check whether a machine has an active run.
+---@param machineAddress string # Machine address to search for.
+---@return boolean # Result of `isMachineActive`.
+function JobPool:isMachineBusy(machineAddress)
+    return self:isMachineActive(machineAddress)
+end
+
+---Build a serializable status snapshot for every stored run, including terminal runs.
+---The returned array order is unspecified; identifiers and phases are stringified,
+---and missing start times fall back to the current time.
+---@return JobSnapshot[] # Newly allocated status records.
 function JobPool:snapshot()
     local snapshot = {}
     local index = 0
@@ -119,8 +438,8 @@ function JobPool:snapshot()
         snapshot[index] = {
             jobId = tostring(jobId),
             machineAddress = tostring(run.machineAddress),
-            phase = tostring(run.executor:phase() or "IDLE"),
-            stepIndex = math.floor(run.executor:stepIndex() or 0),
+            phase = tostring(run.state),
+            stepIndex = math.floor(run.stepIndex or 0),
             startedAt = math.floor(run.startedAt or os.time()),
         }
     end

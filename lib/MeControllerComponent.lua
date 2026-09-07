@@ -1,8 +1,9 @@
 ---@meta _
----@brief API Wrapper for MEController component combined with CommonNetworkAPI in OpenComputers Applied Energistics 2
+---@brief API wrapper for the OpenComputers AE2 ME controller and inherited CommonNetworkAPI.
 ---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/me-controller.lua
 ---@version 1.0.0
 ---@class MeControllerComponent : BaseComponent
+---@field address string # OpenComputers component address inherited from BaseComponent.
 
 local BaseComponent = require("BaseComponent")
 
@@ -10,9 +11,11 @@ local BaseComponent = require("BaseComponent")
 local MeControllerComponent = setmetatable({}, { __index = BaseComponent })
 MeControllerComponent.__index = MeControllerComponent
 
----Creates a new MeControllerComponent instance with the specified address.
+---Create an ME controller wrapper for the specified component address.
+---All network operations are inherited from BaseComponent.
 ---@param address string # The address of the me controller component.
----@return MeControllerComponent | nil, string | nil # A new instance of MeControllerComponent. Will return nil and an error message if the address is invalid.
+---@return MeControllerComponent|nil controller
+---@return string|nil error # Invalid addresses are rejected by BaseComponent.
 function MeControllerComponent:new(address)
     local self, err = BaseComponent.new(self, address)
     if not self then

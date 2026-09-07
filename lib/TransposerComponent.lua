@@ -1,9 +1,21 @@
 ---@meta _
----@brief API Wrapper for Transposer component in OpenComputers for GTNH
+---@brief API wrapper for the OpenComputers transposer component in GTNH.
 ---@see https://github.com/Navatusein/GTNH-OC-Lua-Documentation/blob/main/lua/components/transposer.lua
 ---@version 1.0.0
+---@class TransposerInventoryEntry
+---@field slot integer # Position reported by the normalized stack array.
+---@field name string|nil
+---@field label string|nil
+---@field size number
+---@field maxSize number|nil
+---@field hasNBT boolean
+---@class TransposerSideInfo
+---@field side integer
+---@field side_name string
+---@field container_name string
+---@field slots integer
 ---@class TransposerComponent : BaseComponent
----@field address string
+---@field address string # OpenComputers component address inherited from BaseComponent.
 
 local BaseComponent = require("BaseComponent")
 
@@ -11,9 +23,10 @@ local TransposerComponent = setmetatable({}, { __index = BaseComponent })
 TransposerComponent.__index = TransposerComponent
 
 
----Creates a new TransposerComponent instance with the specified address.
+---Create a transposer wrapper for the specified component address.
 ---@param address string # The address of the transposer component.
----@return TransposerComponent | nil, string | nil # A new instance of TransposerComponent. Will return nil and an error message if the address is invalid.
+---@return TransposerComponent|nil transposer
+---@return string|nil error # Invalid addresses are rejected by BaseComponent.
 function TransposerComponent:new(address)
     local self, err = BaseComponent.new(self, address)
     if not self then
@@ -27,13 +40,14 @@ end
 --- Base Transposer API Functions 
 ---============================================================
 
---- Transfer items between two adjacent inventories via transposer.
----@param fromSide number
----@param toSide number
----@param count number|nil
----@param fromSlot number|nil
----@param toSlot number|nil
----@return number|nil moved, string|nil error
+---Transfer items between two inventories adjacent to the transposer.
+---@param fromSide integer # Source side.
+---@param toSide integer # Destination side.
+---@param count? number # Maximum item count; component default when omitted.
+---@param fromSlot? integer # Source slot; component default when omitted.
+---@param toSlot? integer # Destination slot; component default when omitted.
+---@return number|nil moved
+---@return string|nil error
 function TransposerComponent:transferItem(fromSide, toSide, count, fromSlot, toSlot)
     return self:call(
         "transferItem",
@@ -45,23 +59,26 @@ function TransposerComponent:transferItem(fromSide, toSide, count, fromSlot, toS
     )
 end
 
----Get the number of slots in the inventory on a specific side.
+---Get the number of inventory slots exposed on a side.
 ---@param side integer # The side of the device.
----@return integer # The number of slots in the inventory.
+---@return integer|nil size
+---@return string|nil error
 function TransposerComponent:getInventorySize(side)
     return self:call("getInventorySize", side)
 end
 
---- Get stack metadata for every occupied slot on a side.
---- @param side number
---- @return table|nil stacks
+---Get the component's stack collection for an inventory side.
+---@param side integer
+---@return table|userdata|fun():table|nil stacks # Shape depends on the installed transposer API.
+---@return string|nil error
 function TransposerComponent:getAllStacks(side)
     return self:call("getAllStacks", side)
 end
 
----Get the name of the inventory on a specific side.
+---Get the inventory name exposed on a side.
 ---@param side integer # The side of the device.
----@return string # The name of the inventory.
+---@return string|nil name
+---@return string|nil error
 function TransposerComponent:getInventoryName(side)
     return self:call("getInventoryName", side)
 end
@@ -71,8 +88,11 @@ end
 --- Custom Transposer Functions
 ---============================================================
 
---- Normalize getAllStacks() output to a plain array of item stacks.
--- OC may return an array directly, a stack-slot object with getAll(), or an iterator.
+---Normalize `getAllStacks` output to a plain array of item stacks.
+---Accepts an array directly, a stack-slot object with `getAll`, or an iterator. Iterator
+---and `getAll` exceptions propagate to the caller.
+---@param raw any # Table and iterator values are normalized; unsupported values, including userdata, return nil.
+---@return table[]|nil stacks # Nil when the value has an unsupported type.
 local function normalizeStacks(raw)
     if raw == nil then
         return nil
@@ -98,9 +118,11 @@ local function normalizeStacks(raw)
     return nil
 end
 
---- Snapshot all non-empty stacks on a side using getAllStacks.
---- @param side number
---- @return table[]|nil contents array of {slot, name, label, size, maxSize, hasNBT}
+---Snapshot all non-empty stacks on a side using `getAllStacks`.
+---Yields to the OpenComputers scheduler after each visited array entry when `os.sleep` exists.
+---@param side integer
+---@return TransposerInventoryEntry[]|nil contents
+---@return string|nil error # Component failure or unsupported stack-collection shape.
 function TransposerComponent:getInventoryContents(side)
     local raw, err = self:getAllStacks(side)
     if not raw then
@@ -134,11 +156,14 @@ function TransposerComponent:getInventoryContents(side)
     return contents
 end
 
---- Move every stack from one side to another (chest ↔ bus pattern).
--- Iterates getAllStacks results and transfers each stack.size in full.
--- @param fromSide number
--- @param toSide number
--- @return number|nil total moved, string|nil error
+---Request one transfer for each reported non-empty stack.
+---Each request uses the stack's reported size without specifying a source slot, yields after
+---each entry when possible, and stops on the first failed transfer. A partial moved count is
+---returned with that error when nonzero.
+---@param fromSide integer
+---@param toSide integer
+---@return number|nil moved
+---@return string|nil error
 function TransposerComponent:drainInventory(fromSide, toSide)
     local raw, err = self:getAllStacks(fromSide)
     if not raw then
@@ -171,9 +196,9 @@ end
 
 
 
----Discovers what inventories are on the sides of the transposer for easy mapping, returns a table containing: side,
----side_name, container_name, and slots. Only returns sides that have an inventory.
----@return table
+---Discover inventories exposed on the six transposer sides.
+---Sides for which either size or name is nil are omitted; component errors are not returned.
+---@return table<string, TransposerSideInfo> sides # Map keyed by `Down`, `Up`, `North`, `South`, `West`, or `East`.
 function TransposerComponent:discoverSides()
     local sides = {}
     local side_map = {

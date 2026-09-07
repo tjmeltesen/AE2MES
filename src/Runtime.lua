@@ -1,4 +1,27 @@
+---@meta _
+---@brief Coordinates sensing, cloud scheduling, job execution, and result reporting.
+---@version 1.0.0
+---
+---@class RuntimeConfig
+---@field nodeId string | nil
+---@field cloudBaseUrl string | nil
+---@field meControllerAddr string | nil
+---@field bufferSourceAddress string | nil
+---@field machineFilter string | nil
+---@field statusInterval number | nil
+---@field statusRetryDelay number | nil
+---@field jobRequestCooldown number | nil
+---
 ---@class Runtime
+---@field _config RuntimeConfig # Runtime configuration retained by reference.
+---@field _cache Cache # Shared component and observation cache.
+---@field _cloudClient CloudClient # Cloud API client.
+---@field _nodeSensor NodeSensor # Buffer and machine sensor.
+---@field _jobPool JobPool # Assignment scheduler and executor.
+---@field _lastStatusAt number # Time of the last successful status report.
+---@field _statusBackoffUntil number # Earliest time for another report after failure.
+---@field _lastNoAssignmentDebug string | nil # Signature used to suppress repeated empty-assignment logs.
+---@field _running boolean # Whether `tick` should perform work.
 
 local Cache = require("Cache")
 local CloudClient = require("CloudClient")
@@ -8,13 +31,18 @@ local JobPool = require("JobPool")
 local Runtime = {}
 Runtime.__index = Runtime
 
+---Create a runtime and all of its collaborating services.
+---The configuration is shared with the cloud client and node sensor; module-loading
+---or collaborator-construction errors are not caught.
+---@param config RuntimeConfig | nil # Optional node, cloud, sensor, and interval settings.
+---@return Runtime # Running coordinator with empty cache and job pool.
 function Runtime.new(config)
     local self = setmetatable({}, Runtime)
     self._config = config or {}
     self._cache = Cache.new()
     self._cloudClient = CloudClient.new(config)
     self._nodeSensor = NodeSensor.new(config, self._cache)
-    self._jobPool = JobPool.new(self._cache)
+    self._jobPool = JobPool.new()
     self._lastStatusAt = 0
     self._statusBackoffUntil = 0
     self._lastNoAssignmentDebug = nil
@@ -22,6 +50,10 @@ function Runtime.new(config)
     return self
 end
 
+---Perform one cooperative runtime iteration.
+---Polls sensors, advances jobs, retries terminal-result uplinks, may request assignments,
+---and may report status. Cloud failures are logged; uncaught collaborator errors propagate.
+---@return nil
 function Runtime:tick()
     if not self._running then
         return
@@ -33,21 +65,32 @@ function Runtime:tick()
     self:_handleFinishedJobs(done, false)
     self:_handleFinishedJobs(faulted, true)
 
-    if self._nodeSensor:hasPendingRequest() and self._jobPool:activeCount() == 0 then
+    if self._nodeSensor:hasPendingRequest()
+        and not self._jobPool:hasPending()
+        and not self._jobPool:hasUnreported() then
         self:_submitJobRequest()
     end
 
     self:_maybeReportStatus()
 end
 
+---Stop future runtime iterations.
+---Existing jobs and resources are retained; subsequent `tick` calls return immediately.
+---@return nil
 function Runtime:shutdown()
     self._running = false
 end
 
+---Return the number of jobs currently executing.
+---@return integer # Active run count from the job pool.
 function Runtime:activeJobCount()
     return self._jobPool:activeCount()
 end
 
+---Report node status when its success interval and failure backoff permit.
+---Success updates the last-report time and clears backoff. Failure schedules a retry
+---and prints an error; no exception handling is applied around the cloud client.
+---@return nil
 function Runtime:_maybeReportStatus()
     local now = os.time()
     if now < self._statusBackoffUntil then
@@ -71,6 +114,11 @@ function Runtime:_maybeReportStatus()
     print("[Runtime] status uplink failed: " .. tostring(err))
 end
 
+---Submit current demand, machine availability, and active jobs for scheduling.
+---A failed request is logged and left pending for retry. A successful request clears
+---the sensor's pending flag, logs deduplicated empty responses, and submits each assignment;
+---individual pool rejection results are currently ignored.
+---@return nil
 function Runtime:_submitJobRequest()
     local request = {
         nodeId = self._config.nodeId,
@@ -81,12 +129,13 @@ function Runtime:_submitJobRequest()
     }
 
     local assignments, err = self._cloudClient:submitJobRequest(request)
-    self._nodeSensor:markRequestSent()
 
     if not assignments then
         print("[Runtime] job request failed: " .. tostring(err))
         return
     end
+
+    self._nodeSensor:markRequestSent()
 
     if #assignments == 0 then
         self:_logNoAssignments(request)
@@ -98,6 +147,11 @@ function Runtime:_submitJobRequest()
     end
 end
 
+---Log a bounded diagnostic when a request receives no assignments.
+---Suppresses repeats using a signature derived from the first eight item summaries and
+---the machine count, then prints up to eight item and machine records.
+---@param request table # Previously submitted request payload.
+---@return nil
 function Runtime:_logNoAssignments(request)
     local buffer = request.buffer or {}
     local items = buffer.items or {}
@@ -150,13 +204,21 @@ function Runtime:_logNoAssignments(request)
     end
 end
 
+---Upload completion results and remove each acknowledged run.
+---Missing results are skipped. Failed uplinks are printed and retained for later retries.
+---@param jobIds string[] # Terminal job identifiers to inspect.
+---@param faulted boolean # Terminal category supplied by the caller; currently has no effect.
+---@return nil
 function Runtime:_handleFinishedJobs(jobIds, faulted)
     for _, jobId in ipairs(jobIds) do
-        local run = self._jobPool:get(jobId)
-        if run then
-            local result = run.executor:result() or { ok = not faulted }
-            self._cloudClient:reportCompletion(jobId, result)
-            self._jobPool:remove(jobId)
+        local result = self._jobPool:getResult(jobId)
+        if result then
+            local reported, err = self._cloudClient:reportCompletion(jobId, result)
+            if not reported then
+                print("[Runtime] completion uplink failed: " .. tostring(err))
+            else
+                self._jobPool:remove(jobId)
+            end
         end
     end
 end

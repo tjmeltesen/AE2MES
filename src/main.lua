@@ -1,10 +1,15 @@
--- AE2-ES2 entry point
--- config: nodeId, cloudBaseUrl, meControllerAddr, machineFilter, statusInterval
+---@meta _
+---@brief Starts the AE2-ES2 node runtime with local cloud and hardware configuration.
+---@version 1.0.0
+---
+---Entry point side effects: extends `package.path`, constructs the runtime, and then
+---ticks it indefinitely at 0.5-second intervals. Runtime or sleep errors are not caught.
 
 package.path = "./src/?.lua;./lib/?.lua;" .. package.path
 
 local Runtime = require("Runtime")
 
+---@type RuntimeConfig
 local config = {
     nodeId = "broker-alpha",
     cloudBaseUrl = "https://nonamphibian-unpredictably-deandre.ngrok-free.dev",

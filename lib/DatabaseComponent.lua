@@ -1,9 +1,22 @@
 ---@meta _
----@brief API Wrapper for database component in OpenComputers Applied Energistics 2
+---@brief API wrapper for the OpenComputers Applied Energistics 2 database component.
 ---@version 1.0.0
----@class DatabaseComponent: BaseComponent
----@field size integer
----@field address string
+---@class ItemStack
+---@field name string|nil
+---@field label string|nil
+---@field fluidDrop any|nil # Present for AE2FC fluid-drop entries.
+---@field damage integer|nil
+---@field size number|nil
+---@class DatabaseIndexEntry
+---@field dbSlot integer # One-based database slot.
+---@field name string|nil # Unlocalized stack name.
+---@field label string|nil # Display label, falling back to the name.
+---@field fluid boolean # True when the entry represents an AE2FC fluid drop.
+---@class DatabaseComponent : BaseComponent
+---@field size integer # Number of slots scanned by this wrapper.
+---@field address string # OpenComputers component address inherited from BaseComponent.
+---@field index DatabaseIndexEntry[] # Cached non-empty slot metadata.
+---@field refreshIndex fun(self: DatabaseComponent): DatabaseIndexEntry[] # Rebuild the cached slot index.
 
 
 local BaseComponent = require("BaseComponent")
@@ -11,10 +24,12 @@ local BaseComponent = require("BaseComponent")
 local DatabaseComponent = setmetatable({}, { __index = BaseComponent })
 DatabaseComponent.__index = DatabaseComponent
 
----Creates a new DatabaseComponent instance with the specified size (number of slots,type).
+---Create a database wrapper and immediately cache its non-empty slot index.
+---Index refresh component errors are treated as empty slots and do not fail construction.
 ---@param address string # The address of the database component.
----@param size integer # The size of the database. If nil, it will be inferred as base size of 9.
----@return DatabaseComponent | nil, string | nil # A new instance of DatabaseComponent. Will return nil and an error message if the address is invalid.
+---@param size? integer # Number of database slots; defaults to 9.
+---@return DatabaseComponent|nil database
+---@return string|nil error # Invalid addresses are rejected by BaseComponent.
 function DatabaseComponent:new(address, size)
     local self, err = BaseComponent.new(self, address)
     if not self then
@@ -29,8 +44,9 @@ function DatabaseComponent:new(address, size)
     return self
 end
 
----Scan database slots and cache non-empty entries for lookup.
----@return table[]
+---Scan one-based database slots and cache metadata for every non-empty entry.
+---Per-slot component errors are indistinguishable from empty slots and are skipped.
+---@return DatabaseIndexEntry[] index # The new cache, also assigned to `self.index`.
 function DatabaseComponent:refreshIndex()
     local index = {}
     for slot = 1, self.size do
@@ -49,70 +65,80 @@ function DatabaseComponent:refreshIndex()
 end
 
 
----Get the representation of the item stack stored in the specified slot.
+---Get the item-stack descriptor stored in a database slot.
 ---@param slot integer # The slot to get an item from.
----@return ItemStack|nil # The item stack's descriptor if a value was found.
+---@return ItemStack|nil stack # Nil for an empty slot or component failure.
+---@return string|nil error
 function DatabaseComponent:get(slot)
     return self:call("get", slot)
 end
 
----Gets the index of an item stack with the specified hash. Returns a negative value if no such stack was found.
+---Find the slot containing an item stack with the specified hash.
 ---@param hash string # The hash of the item you are looking for.
----@return number # slot of the item or -1 if not found
+---@return integer|nil slot # Negative when not found; nil on component failure.
+---@return string|nil error
 function DatabaseComponent:indexOf(hash)
     return self:call("indexOf", hash)
 end
 
----Set an item into the specified database slot. NBT tag is expected in JSON format
+---Write an item descriptor into a database slot.
+---This mutates the component but does not refresh the wrapper's cached index.
 ---@param slot integer # The slot to write an item to
 ---@param id string  # The unlocalized name of the item eg: minecraft:stone
 ---@param damage integer # The damage/metadata of the item
 ---@param nbt? string # The nbt of the item, formatted using JSON
----@return boolean # True if the item was successfully written.
----@return nil|string # An error telling you what went wrong.
+---@return boolean|nil written
+---@return string|nil error
 function DatabaseComponent:set(slot, id, damage, nbt)
     return self:call("set", slot, id, damage, nbt)
 end
 
----Clears the specified slot. Returns true if there was something in the slot before.
+---Clear a database slot without refreshing the cached index.
 ---@param slot integer
----@return boolean # Returns true if there was something in the slot before.
+---@return boolean|nil hadValue # True when the slot contained a value before clearing.
+---@return string|nil error
 function DatabaseComponent:clear(slot)
     return self:call("clear", slot)
 end
 
----Copies the data stored in this database to another database with the specified address.
----Will error if the database has empty slots.
+---Copy this database's contents to another database component.
+---The underlying component rejects databases containing empty slots; failures are returned.
 ---@param dbAddress string # The address of the database to copy to.
----@return integer # how many slots were overwritten.
+---@return integer|nil overwritten # Number of destination slots overwritten.
+---@return string|nil error
 function DatabaseComponent:clone(dbAddress)
     return self:call("clone", dbAddress)
 end
 
----Computes a hash value for the item stack in the specified slot.
+---Compute the hash of the item stack in a database slot.
 ---@param slot integer # The slot to compute the hash for
----@return string
+---@return string|nil hash
+---@return string|nil error
 function DatabaseComponent:computeHash(slot)
     return self:call("computeHash", slot)
 end
 
----Copies an entry to another slot, optionally to another database. Returns true if something was overwritten.
+---Copy an entry to another slot, optionally in another database.
+---This does not refresh the wrapper's cached index.
 ---@param fromSlot integer # The slot to copy from
 ---@param toSlot integer # The slot to copy to
 ---@param dbAddress? string # (Optional) The address of the database to copy to.
----@return boolean # True if something was overwritten.
+---@return boolean|nil overwritten
+---@return string|nil error
 function DatabaseComponent:copy(fromSlot, toSlot, dbAddress) 
     return self:call("copy", fromSlot, toSlot, dbAddress)
 end
 
---- Gets the size of the database.
+---Get the configured slot count used by wrapper scans.
 ---@return integer # The size of the database. Default 9 if not set.
 function DatabaseComponent:getSize()
     return self.size
 end
 
---- Clears all slots in the database. Returns true if any slot was cleared. (0 index or 1 index not sure yet.)
----@return boolean # True if any slot was cleared.
+---Clear every one-based slot from 1 through `getSize`.
+---Continues after component errors, does not refresh `self.index`, and returns whether any
+---clear call reported that a value had existed.
+---@return boolean clearedAny
 function DatabaseComponent:clearAll()
     local clearedAny = false
     for i = 1, self:getSize() do

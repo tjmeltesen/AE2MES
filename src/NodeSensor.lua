@@ -1,10 +1,41 @@
+---@meta _
+---@brief Watches the ME buffer and polls GT machines for cloud scheduling state.
+---@version 1.0.0
+---
+---@class BufferSnapshot
+---@field items table[] | nil # Item stacks reported by the ME controller.
+---@field fluids table[] | nil # Fluid stacks reported by the ME controller.
+---
+---@class MachineAvailabilityEntry
+---@field machineAddress string
+---@field available boolean
+---@field active boolean
+---@field hasWork boolean
+---@field workAllowed boolean
+---@field problems number
+---@field progressCurrent number | nil
+---@field progressMax number | nil
+---@field unavailableReason string
+---@field busy boolean
+---
 ---@class NodeSensor
+---@field _config table # Sensor intervals, addresses, and component filter configuration.
+---@field _cache Cache # Shared component and snapshot cache.
+---@field _bufferSnapshot BufferSnapshot | nil # Last changed buffer snapshot observed by this instance.
+---@field _machineAvailability MachineAvailabilityEntry[] # Most recent hardware scan.
+---@field _pendingRequest boolean # Whether a changed buffer is awaiting a cloud request.
+---@field _lastRequestAt number # `os.time()` value recorded after the last accepted request.
 
 local component = require("component")
 
 local NodeSensor = {}
 NodeSensor.__index = NodeSensor
 
+---Create a node sensor backed by a shared cache.
+---The supplied configuration and cache are retained by reference and are not validated.
+---@param config table | nil # Optional sensor configuration.
+---@param cache Cache # Cache used for wrappers and previous snapshots.
+---@return NodeSensor # New sensor with no observations and no pending request.
 function NodeSensor.new(config, cache)
     local self = setmetatable({}, NodeSensor)
     self._config = config or {}
@@ -16,14 +47,23 @@ function NodeSensor.new(config, cache)
     return self
 end
 
+---Poll the configured ME buffer once.
+---A detected content-signature change updates caches, marks a request pending, and scans machines.
+---@return nil
 function NodeSensor:tick()
     self:_watchBuffer()
 end
 
+---Return the most recently changed buffer snapshot.
+---@return BufferSnapshot | nil # Snapshot retained from the controller, or nil before the first change.
 function NodeSensor:bufferSnapshot()
     return self._bufferSnapshot
 end
 
+---Return a shallow copy of the latest machine scan with current job-pool busy flags.
+---If no machine entries are cached, performs a scan first. Nested entry values remain shared.
+---@param jobPool JobPool | nil # Optional pool used to identify machine addresses with active runs.
+---@return MachineAvailabilityEntry[] # Newly allocated availability array and entry tables.
 function NodeSensor:machineAvailability(jobPool)
     if #self._machineAvailability == 0 then
         self:scanMachines()
@@ -50,6 +90,10 @@ function NodeSensor:machineAvailability(jobPool)
     return availability
 end
 
+---Check whether a changed buffer may trigger a cloud job request.
+---A pending request remains suppressed until jobRequestCooldown seconds have elapsed
+---since the last successful submission.
+---@return boolean # True only when a request is pending and its cooldown has expired.
 function NodeSensor:hasPendingRequest()
     if not self._pendingRequest then
         return false
@@ -63,11 +107,18 @@ function NodeSensor:hasPendingRequest()
     return true
 end
 
+---Acknowledge that the pending job request was submitted.
+---Clears the pending flag and records the current `os.time()` value.
+---@return nil
 function NodeSensor:markRequestSent()
     self._pendingRequest = false
     self._lastRequestAt = os.time()
 end
 
+---Discover and poll all configured GT machine components.
+---Replaces the current scan, stores the resulting array in the shared cache by reference,
+---and may propagate component enumeration or wrapper polling errors.
+---@return MachineAvailabilityEntry[] # Internal availability array for the completed scan.
 function NodeSensor:scanMachines()
     self._machineAvailability = {}
     local addresses = self:_discoverMachineAddresses()
@@ -83,6 +134,8 @@ function NodeSensor:scanMachines()
     return self._machineAvailability
 end
 
+---Enumerate component addresses matching the configured machine filter.
+---@return string[] # Discovered addresses in component iterator order.
 function NodeSensor:_discoverMachineAddresses()
     local addresses = {}
     local filter = self._config.machineFilter or "gt_machine"
@@ -94,6 +147,10 @@ function NodeSensor:_discoverMachineAddresses()
     return addresses
 end
 
+---Read scheduling state from one machine wrapper.
+---Wrapper/proxy lookup failures return nil; exceptions from component methods propagate.
+---@param address string # OpenComputers machine component address.
+---@return MachineAvailabilityEntry | nil # Scheduling record, or nil when the wrapper or proxy is unavailable.
 function NodeSensor:_pollMachine(address)
     local machine = self._cache:getComponent(address, "Machine")
     if not machine then
@@ -121,6 +178,10 @@ function NodeSensor:_pollMachine(address)
     }
 end
 
+---Watch the configured ME controller for a changed item/fluid signature.
+---Missing configuration, wrapper lookup failures, and snapshot failures are ignored.
+---A change stores the snapshot, marks a request pending, and immediately scans machines.
+---@return nil
 function NodeSensor:_watchBuffer()
     local address = self._config.meControllerAddr or self._config.bufferSourceAddress
     if not address then
@@ -146,6 +207,11 @@ function NodeSensor:_watchBuffer()
     end
 end
 
+---Build a stable content signature from item and fluid names and quantities.
+---Entry order is ignored. Item quantity prefers `size` and falls back to `count`;
+---fluid quantity uses `amount`. Other fields are not represented.
+---@param snapshot BufferSnapshot # Snapshot whose items and fluids are inspected.
+---@return string # Sorted, delimiter-joined content signature.
 function NodeSensor:_snapshotSignature(snapshot)
     local parts = {}
 
@@ -169,6 +235,10 @@ function NodeSensor:_snapshotSignature(snapshot)
     return table.concat(parts, "|")
 end
 
+---Compare two buffer snapshots by their reduced content signatures.
+---@param a BufferSnapshot | any # First snapshot.
+---@param b BufferSnapshot | any # Second snapshot.
+---@return boolean # False for non-tables; otherwise true when represented content matches.
 function NodeSensor:_snapshotsEqual(a, b)
     if type(a) ~= "table" or type(b) ~= "table" then
         return false
