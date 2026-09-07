@@ -120,9 +120,11 @@ function Runtime:_maybeReportStatus()
 end
 
 ---Submit current demand, machine availability, and active jobs for scheduling.
----A failed request is logged and left pending for retry. A successful request clears
----the sensor's pending flag, logs deduplicated empty responses, and submits each assignment;
----individual pool rejection results are currently ignored.
+---HTTP failures are logged and left pending for retry. Mock-mode failures still return
+---`nil, err` from CloudClient, then call `markRequestSent()` so `jobRequestCooldown`
+---throttles the every-tick print loop. A successful request clears the sensor's pending
+---flag, logs deduplicated empty responses, and submits each assignment; individual pool
+---rejection results are currently ignored.
 ---@return nil
 function Runtime:_submitJobRequest()
     local request = {
@@ -137,6 +139,9 @@ function Runtime:_submitJobRequest()
 
     if not assignments then
         print("[Runtime] job request failed: " .. tostring(err))
+        if self._config.useMockAssignment == true then
+            self._nodeSensor:markRequestSent()
+        end
         return
     end
 

@@ -80,6 +80,39 @@ test("mock reportStatus and reportCompletion succeed without HTTP", function()
     assertEqual(true, okDone, doneErr or "completion ok")
 end)
 
+test("malformed mock fixture returns nil, err without raising", function()
+    package.loaded["CloudClient"] = nil
+    package.loaded["Comms"] = {
+        requestJSONPost = function()
+            error("HTTP should not run in mock mode")
+        end,
+        requestJSON = function()
+            error("HTTP should not run in mock mode")
+        end,
+    }
+
+    local path = os.tmpname()
+    local file = assert(io.open(path, "w"))
+    file:write('{"assignments":[{"sequenceFlow":"not-a-table"},42]}')
+    file:close()
+
+    local CloudClient = require("CloudClient")
+    local client = CloudClient.new({
+        nodeId = "broker-alpha",
+        useMockAssignment = true,
+        mockAssignmentPath = path,
+    })
+
+    local ok, assignments, err = pcall(client.submitJobRequest, client, {
+        buffer = { items = {}, fluids = {} },
+    })
+    os.remove(path)
+
+    assertTrue(ok, "malformed fixture must not raise")
+    assertEqual(nil, assignments, "assignments must be nil")
+    assertTrue(type(err) == "string" and err ~= "", "err must be a string")
+end)
+
 test("Runtime forces one pending request in mock mode", function()
     package.loaded["Runtime"] = nil
     package.loaded["CloudClient"] = nil

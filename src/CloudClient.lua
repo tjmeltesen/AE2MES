@@ -74,8 +74,17 @@ function CloudClient:_readMockAssignmentFile()
 end
 
 ---Copy request.buffer materials onto assignment sequenceFlow (size → count for items).
+---@param data any # Assignment object table; non-tables return nil, err.
+---@param buffer table | nil # Request buffer whose items/fluids overwrite sequenceFlow.
+---@return table | nil data # Mutated assignment table when `data` is a table.
+---@return string | nil error # Type error when `data` is not a table.
 function CloudClient:_applyBufferToAssignmentData(data, buffer)
-    data.sequenceFlow = data.sequenceFlow or {}
+    if type(data) ~= "table" then
+        return nil, "CloudClient:_applyBufferToAssignmentData() — expected assignment table"
+    end
+    if type(data.sequenceFlow) ~= "table" then
+        data.sequenceFlow = {}
+    end
     local items = {}
     local fluids = {}
 
@@ -126,10 +135,16 @@ function CloudClient:submitJobRequest(request)
 
         if type(data.assignments) == "table" then
             for _, entry in ipairs(data.assignments) do
-                self:_applyBufferToAssignmentData(entry, request.buffer)
+                local applied, applyErr = self:_applyBufferToAssignmentData(entry, request.buffer)
+                if not applied then
+                    return nil, applyErr
+                end
             end
         else
-            self:_applyBufferToAssignmentData(data, request.buffer)
+            local applied, applyErr = self:_applyBufferToAssignmentData(data, request.buffer)
+            if not applied then
+                return nil, applyErr
+            end
         end
 
         return Assignment.listFromJSON(JSON:encode(data))
