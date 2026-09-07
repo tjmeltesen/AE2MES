@@ -11,6 +11,8 @@
 ---@field statusInterval number | nil
 ---@field statusRetryDelay number | nil
 ---@field jobRequestCooldown number | nil
+---@field useMockAssignment boolean | nil
+---@field mockAssignmentPath string | nil
 ---
 ---@class Runtime
 ---@field _config RuntimeConfig # Runtime configuration retained by reference.
@@ -47,6 +49,9 @@ function Runtime.new(config)
     self._statusBackoffUntil = 0
     self._lastNoAssignmentDebug = nil
     self._running = true
+    if self._config.useMockAssignment == true then
+        self._nodeSensor:forcePendingRequest()
+    end
     return self
 end
 

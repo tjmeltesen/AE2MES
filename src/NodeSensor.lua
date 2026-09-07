@@ -115,6 +115,14 @@ function NodeSensor:markRequestSent()
     self._lastRequestAt = os.time()
 end
 
+---Mark a job request pending and clear cooldown so the next eligible tick can submit.
+---Used by mock-mode Runtime startup; does not mutate buffer snapshots.
+---@return nil
+function NodeSensor:forcePendingRequest()
+    self._pendingRequest = true
+    self._lastRequestAt = 0
+end
+
 ---Discover and poll all configured GT machine components.
 ---Replaces the current scan, stores the resulting array in the shared cache by reference,
 ---and may propagate component enumeration or wrapper polling errors.

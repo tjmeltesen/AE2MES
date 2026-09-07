@@ -4,6 +4,10 @@
 ---
 ---Entry point side effects: extends `package.path`, constructs the runtime, and then
 ---ticks it indefinitely at 0.5-second intervals. Runtime or sleep errors are not caught.
+---
+---When `useMockAssignment` is true, Runtime reads `fixtures/mock_assignment.json`,
+---injects current buffer items/fluids into the fixture sequenceFlow, and prints
+---status/completion locally instead of calling cloud HTTP.
 
 package.path = "./src/?.lua;./lib/?.lua;" .. package.path
 
@@ -18,6 +22,11 @@ local config = {
     statusInterval = 30,
     statusRetryDelay = 15,
     jobRequestCooldown = 15,
+
+    -- In-game full pipeline without cloud HTTP.
+    -- Edit fixtures/mock_assignment.json addresses/sides, then set true.
+    useMockAssignment = true,
+    mockAssignmentPath = "fixtures/mock_assignment.json",
 }
 
 local runtime = Runtime.new(config)

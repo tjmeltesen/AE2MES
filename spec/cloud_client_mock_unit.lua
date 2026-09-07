@@ -80,6 +80,33 @@ test("mock reportStatus and reportCompletion succeed without HTTP", function()
     assertEqual(true, okDone, doneErr or "completion ok")
 end)
 
+test("Runtime forces one pending request in mock mode", function()
+    package.loaded["Runtime"] = nil
+    package.loaded["CloudClient"] = nil
+    package.loaded["NodeSensor"] = nil
+    package.loaded["JobPool"] = nil
+    package.loaded["Cache"] = nil
+    package.loaded["Comms"] = {
+        requestJSONPost = function() error("no http") end,
+        requestJSON = function() error("no http") end,
+    }
+
+    -- Avoid requiring real OC component during NodeSensor construction/tick.
+    package.loaded["component"] = {
+        list = function() return function() end end,
+    }
+
+    local Runtime = require("Runtime")
+    local runtime = Runtime.new({
+        useMockAssignment = true,
+        mockAssignmentPath = "fixtures/mock_assignment.json",
+        nodeId = "broker-alpha",
+        jobRequestCooldown = 0,
+    })
+
+    assertEqual(true, runtime._nodeSensor:hasPendingRequest(), "mock startup should pending")
+end)
+
 if failures > 0 then
     os.exit(1)
 end
