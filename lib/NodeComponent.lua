@@ -66,13 +66,53 @@ local function registryAddress(registry, key)
     return nil
 end
 
----Configure this node from a cloud assignment registry.
+---Build a READY node from an approved machine mapping and sticky ComponentCache Globals.
+---Reuses `configureFromRegistry` for wiring. Interface wrappers are created here (lazily),
+---not during discovery. Cluster `redstoneSides` come from Globals only.
+---@param mapping table # Cloud machine mapping (addresses, sides, mappingRevision, status).
+---@param globals? { databaseAddress?: string, databaseSize?: integer, redstoneAddress?: string, redstoneSides?: table }
+---@param cache? ComponentCache|Cache # Hardware wrapper identity store.
+---@return NodeComponent|nil node
+---@return string|nil error
+function NodeComponent:fromMapping(mapping, globals, cache)
+    if type(mapping) ~= "table" then
+        return nil, "NodeComponent:fromMapping() — expected machine mapping table"
+    end
+    if mapping.status ~= nil and mapping.status ~= "READY" then
+        return nil, "NodeComponent:fromMapping() — machine mapping is not READY"
+    end
+    globals = type(globals) == "table" and globals or {}
+
+    local registry = {
+        machineAddress = mapping.machineAddress,
+        interfaceAddress = mapping.interfaceAddress,
+        transposerAddress = mapping.transposerAddress,
+        transposerSides = mapping.transposerSides,
+        redstoneSides = globals.redstoneSides,
+    }
+
+    local node = NodeComponent:new()
+    local ok, err = node:configureFromRegistry(registry, globals, cache)
+    if not ok then
+        return nil, err
+    end
+
+    node.machineAddress = registry.machineAddress
+    node.interfaceAddress = registry.interfaceAddress
+    node.transposerAddress = registry.transposerAddress
+    node.mappingRevision = mapping.mappingRevision
+    return node
+end
+
+---Configure per-machine hardware from a cloud registry and broker-global hardware locally.
 ---Side maps are replaced before wrapper construction, so an error can leave partial configuration.
 ---Missing component addresses are allowed because some workflows use only a subset of wrappers.
 ---@param registry table # Raw registry map or Assignment Registry wrapper.
+---@param globals? { databaseAddress?: string, databaseSize?: integer, redstoneAddress?: string }
+---@param cache? ComponentCache|Cache # Sticky ComponentCache (or Cache façade) for wrapper identity.
 ---@return boolean ok # True when every requested wrapper was constructed.
 ---@return string | nil error # Component construction or registry validation error.
-function NodeComponent:configureFromRegistry(registry)
+function NodeComponent:configureFromRegistry(registry, globals, cache)
     if type(registry) ~= "table" then
         return false, "NodeComponent:configureFromRegistry() — expected registry table"
     end
@@ -85,44 +125,97 @@ function NodeComponent:configureFromRegistry(registry)
     local machineAddr = registryAddress(registry, "machineAddress")
     local transposerAddr = registryAddress(registry, "transposerAddress")
     local interfaceAddr = registryAddress(registry, "interfaceAddress")
-    local databaseAddr = registryAddress(registry, "databaseAddress")
-    local redstoneAddr = registryAddress(registry, "redstoneAddress")
+    globals = type(globals) == "table" and globals or {}
+    local databaseAddr = globals.databaseAddress
+    local redstoneAddr = globals.redstoneAddress
 
     if machineAddr then
-        local _, setErr = self:setMachine(machineAddr)
+        local _, setErr
+        if cache then self.machine, setErr = cache:getComponent(machineAddr, "Machine")
+        else self.machine, setErr = self:setMachine(machineAddr) end
         if setErr then
             return false, setErr
         end
     end
 
     if transposerAddr then
-        local _, setErr = self:setTransposer(transposerAddr)
+        local _, setErr
+        if cache then self.transposer, setErr = cache:getComponent(transposerAddr, "TransposerComponent")
+        else self.transposer, setErr = self:setTransposer(transposerAddr) end
         if setErr then
             return false, setErr
         end
     end
 
     if databaseAddr then
-        local _, setErr = self:setDatabase(databaseAddr, registryValue(registry, "databaseSize"))
-        if setErr then
+        local database, setErr
+        if cache then
+            database, setErr = cache:getComponent(
+                databaseAddr,
+                "DatabaseComponent",
+                globals.databaseSize
+            )
+            self.database = database
+        else
+            database, setErr = self:setDatabase(databaseAddr, globals.databaseSize)
+        end
+        if not database then
             return false, setErr
         end
     end
 
     if interfaceAddr then
-        local _, setErr = self:setInterface(interfaceAddr)
+        local _, setErr
+        if cache then self.interface, setErr = cache:getComponent(interfaceAddr, "Interface", self.database)
+        else self.interface, setErr = self:setInterface(interfaceAddr) end
         if setErr then
             return false, setErr
         end
     end
 
     if redstoneAddr then
-        local _, setErr = self:setRedstone(redstoneAddr)
-        if setErr then
+        local redstone, setErr
+        if cache then
+            redstone, setErr = cache:getComponent(redstoneAddr, "RedstoneComponent")
+            self.redstone = redstone
+        else
+            redstone, setErr = self:setRedstone(redstoneAddr)
+        end
+        if not redstone then
             return false, setErr
         end
     end
 
+    return true
+end
+
+local function mergeValue(target, key, incoming, path)
+    if incoming == nil then return true end
+    if target[key] == nil then target[key] = incoming return true end
+    if target[key] ~= incoming then return false, "topology_changed: " .. path end
+    return true
+end
+
+---Fill explicitly missing cached topology fields. Existing values are never overwritten.
+function NodeComponent:mergeRegistry(registry)
+    if registry == nil then return true end
+    if type(registry) ~= "table" then return false, "topology_changed: invalid registry" end
+    local ok, err
+    ok, err = mergeValue(self, "machineAddress", registryAddress(registry, "machineAddress"), "machineAddress")
+    if not ok then return false, err end
+    ok, err = mergeValue(self, "interfaceAddress", registryAddress(registry, "interfaceAddress"), "interfaceAddress")
+    if not ok then return false, err end
+    ok, err = mergeValue(self, "transposerAddress", registryAddress(registry, "transposerAddress"), "transposerAddress")
+    if not ok then return false, err end
+    for _, pair in ipairs({ { "transposerSides", self.transposerSides }, { "redstoneSides", self.redstoneSides } }) do
+        local incoming = registryValue(registry, pair[1])
+        if type(incoming) == "table" then
+            for role, side in pairs(incoming) do
+                ok, err = mergeValue(pair[2], role, side, pair[1] .. "." .. tostring(role))
+                if not ok then return false, err end
+            end
+        end
+    end
     return true
 end
 
@@ -369,6 +462,16 @@ local function drainInputToReturn(self, inputSide)
     return self.transposer:drainInventory(inputSide, returnSide)
 end
 
+---Clear interface configuration references and the database slots staged for this transfer.
+---@param self NodeComponent
+---@return nil
+local function clearStagedConfiguration(self)
+    self.interface:clearAllConfigurations()
+    if self.database and type(self.database.clearTracked) == "function" then
+        self.database:clearTracked()
+    end
+end
+
 ---============================================================
 --- Job execution
 ---============================================================
@@ -398,8 +501,8 @@ function NodeComponent:transferToMachine(fromSide, toSide, opts)
 
     fromSide = fromSide or self:transposerSide("pull")
     toSide = toSide or self:transposerSide("input")
-    startSide = startSide or self:redstoneSide("start")
-    stopSide = stopSide or self:redstoneSide("stop")
+    local startSide = self:redstoneSide("start")
+    local stopSide = self:redstoneSide("stop")
     if not self.interface or not self.database or not self.transposer or not self.redstone then
         return false
     end
@@ -407,12 +510,15 @@ function NodeComponent:transferToMachine(fromSide, toSide, opts)
         return false
     end
 
+    if type(self.interface.bindDatabase) == "function" then
+        self.interface:bindDatabase(self.database)
+    end
     self.interface:setAllConfigurations()
 
 
     local moved = self.transposer:drainInventory(fromSide, toSide)
     if moved == nil then
-        self.interface:clearAllConfigurations()
+        clearStagedConfiguration(self)
         return false
     end
 
@@ -420,12 +526,12 @@ function NodeComponent:transferToMachine(fromSide, toSide, opts)
         if not waitUntil(function()
             return sideIsEmpty(self.transposer, fromSide)
         end, DRAIN_TIMEOUT_SEC) then
-            self.interface:clearAllConfigurations()
+            clearStagedConfiguration(self)
             return false
         end
     end
 
-    self.interface:clearAllConfigurations()
+    clearStagedConfiguration(self)
     self.redstone:pulse(startSide, 1)
     if not requireProcessing then
         drainInputToReturn(self, toSide)

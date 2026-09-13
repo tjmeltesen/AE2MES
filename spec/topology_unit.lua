@@ -157,6 +157,172 @@ test("NodeSensor owns buffer and machine-scan snapshots without Cache snapshot A
     eq(false, sensor:hasPendingRequest(), "unchanged buffer does not re-pend without cache snapshots")
 end)
 
+test("fromMapping builds READY node from machine mapping + ComponentCache Globals", function()
+    mock_oc.reset()
+    package.loaded.ComponentCache = nil
+    package.loaded.NodeComponent = nil
+    package.loaded.Interface = nil
+    package.loaded.Machine = nil
+    package.loaded.TransposerComponent = nil
+    package.loaded.DatabaseComponent = nil
+    package.loaded.RedstoneComponent = nil
+
+    local ComponentCache = require("ComponentCache")
+    local NodeComponent = require("NodeComponent")
+    local cache = ComponentCache.new()
+
+    local database = assert(cache:getComponent("db-staging", "DatabaseComponent", 9))
+    assert(cache:getComponent("redstone-001", "RedstoneComponent"))
+    assert(cache:getComponent("machine-lathe", "Machine"))
+    assert(cache:getComponent("transposer-001", "TransposerComponent"))
+
+    local mapping = {
+        machineAddress = "machine-lathe",
+        interfaceAddress = "iface-lathe",
+        transposerAddress = "transposer-001",
+        transposerSides = { pull = 3, input = 2, returnSide = 4 },
+        mappingRevision = 3,
+        status = "READY",
+    }
+    local globals = {
+        databaseAddress = "db-staging",
+        databaseSize = 9,
+        redstoneAddress = "redstone-001",
+        redstoneSides = { start = 0, stop = 1 },
+    }
+
+    local node, err = NodeComponent:fromMapping(mapping, globals, cache)
+    assert(node, err)
+    eq(database, node.database, "sticky Global database identity")
+    eq("machine-lathe", node.machine and node.machine.address, "machine from mapping")
+    eq("iface-lathe", node.interface and node.interface.address, "interface from mapping")
+    eq("transposer-001", node.transposer and node.transposer.address, "transposer from mapping")
+    eq(3, node.transposerSides.pull, "transposer sides applied")
+    eq(0, node.redstoneSides.start, "cluster redstone sides from Globals")
+    eq(3, node.mappingRevision, "mappingRevision retained")
+    eq("machine-lathe", node.machineAddress, "address fields for mergeRegistry")
+end)
+
+test("NodeCache build/get/retire generations; Cache façades node APIs", function()
+    mock_oc.reset()
+    package.loaded.ComponentCache = nil
+    package.loaded.NodeCache = nil
+    package.loaded.Cache = nil
+    package.loaded.NodeComponent = nil
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    assert(cache:getComponent("db-staging", "DatabaseComponent", 9))
+    assert(cache:getComponent("redstone-001", "RedstoneComponent"))
+    assert(cache:getComponent("machine-lathe", "Machine"))
+    assert(cache:getComponent("transposer-001", "TransposerComponent"))
+
+    local mapping = {
+        machineAddress = "machine-lathe",
+        interfaceAddress = "iface-lathe",
+        transposerAddress = "transposer-001",
+        transposerSides = { pull = 3, input = 2 },
+        mappingRevision = 1,
+        status = "READY",
+    }
+    local globals = {
+        databaseAddress = "db-staging",
+        databaseSize = 9,
+        redstoneAddress = "redstone-001",
+        redstoneSides = { start = 0, stop = 1 },
+    }
+
+    eq(nil, cache:getNode("machine-lathe"), "no node before READY build")
+
+    local first, err = cache:buildNode(mapping, globals)
+    assert(first, err)
+    eq(first, cache:getNode("machine-lathe"), "get current after build")
+    eq(1, first.cacheGeneration, "first generation")
+    eq(1, first.mappingRevision, "mappingRevision on node")
+
+    mapping.mappingRevision = 2
+    mapping.interfaceAddress = "iface-lathe-b"
+    local second = assert(cache:buildNode(mapping, globals))
+    eq(second, cache:getNode("machine-lathe"), "rebuild replaces current")
+    eq(2, second.cacheGeneration, "second generation")
+    eq(true, first ~= second, "new generation is distinct node")
+    eq(1, first.cacheGeneration, "prior generation retained until retire")
+
+    cache:retireGeneration("machine-lathe", 1)
+    eq(second, cache:getNode("machine-lathe"), "current survives retire of prior")
+    -- Retiring current is a no-op for getNode semantics until a newer build.
+    cache:retireGeneration("machine-lathe", 2)
+    eq(second, cache:getNode("machine-lathe"), "current generation is not dropped by retire")
+
+    assert(cache._nodeCache ~= nil, "Cache façades NodeCache")
+    eq(second, cache._nodeCache:get("machine-lathe"), "façade shares NodeCache store")
+end)
+
+test("interfaces are created lazily on READY mapping, not at discovery", function()
+    mock_oc.reset()
+    package.loaded.ComponentCache = nil
+    package.loaded.Cache = nil
+    package.loaded.ComponentDiscovery = nil
+    package.loaded.HardwareDiscovery = nil
+    package.loaded.Interface = nil
+    package.loaded.NodeComponent = nil
+    package.loaded.NodeCache = nil
+
+    local Interface = require("Interface")
+    local constructions = 0
+    local originalNew = Interface.new
+    Interface.new = function(self, address, databaseObj)
+        constructions = constructions + 1
+        return originalNew(self, address, databaseObj)
+    end
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    mock_oc.set_proxy_override("transposer-001", {
+        getInventorySize = function(side) return side == 2 and 16 or nil end,
+        getInventoryName = function(side) return side == 2 and "input bus" or nil end,
+    })
+
+    local Discovery = require("HardwareDiscovery")
+    local observation = assert(Discovery.discover({ clusterId = "cluster-a" }, cache))
+    eq(0, constructions, "discovery does not construct interface wrappers")
+
+    assert(cache:getComponent("machine-lathe", "Machine"))
+    assert(cache:getComponent(observation.globals.meControllerAddress, "MeControllerComponent"))
+    assert(cache:getComponent(observation.globals.databaseAddress, "DatabaseComponent",
+        observation.globals.databaseSize))
+    assert(cache:getComponent(observation.globals.redstoneAddress, "RedstoneComponent"))
+    eq(0, constructions, "eager Globals do not construct interfaces")
+
+    local mapping = {
+        machineAddress = "machine-lathe",
+        interfaceAddress = "iface-store",
+        transposerAddress = "transposer-001",
+        transposerSides = { pull = 3, input = 2 },
+        mappingRevision = 1,
+        status = "READY",
+    }
+    local globals = {
+        databaseAddress = observation.globals.databaseAddress,
+        databaseSize = observation.globals.databaseSize,
+        redstoneAddress = observation.globals.redstoneAddress,
+        redstoneSides = { start = 0, stop = 1 },
+    }
+
+    local node = assert(cache:buildNode(mapping, globals))
+    eq(1, constructions, "READY mapping creates interface wrapper once")
+    eq("iface-store", node.interface.address, "interface wired on node")
+
+    mapping.status = "UNMAPPED"
+    local rejected, rejectErr = cache:buildNode(mapping, globals)
+    eq(nil, rejected, "non-READY mapping does not build")
+    eq(true, type(rejectErr) == "string" and rejectErr:find("READY", 1, true) ~= nil,
+        "non-READY build reports READY requirement")
+    eq(1, constructions, "non-READY path does not construct another interface")
+
+    Interface.new = originalNew
+end)
+
 if failures > 0 then
     os.exit(1)
 end
