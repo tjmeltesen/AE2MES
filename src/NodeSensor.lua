@@ -20,21 +20,19 @@
 ---
 ---@class NodeSensor
 ---@field _config table # Sensor intervals, addresses, and component filter configuration.
----@field _cache Cache # Shared component and snapshot cache.
+---@field _cache Cache # Shared component cache used for ME and machine wrappers.
 ---@field _bufferSnapshot BufferSnapshot | nil # Last changed buffer snapshot observed by this instance.
 ---@field _machineAvailability MachineAvailabilityEntry[] # Most recent hardware scan.
 ---@field _pendingRequest boolean # Whether a changed buffer is awaiting a cloud request.
 ---@field _lastRequestAt number # `os.time()` value recorded after the last accepted request.
 
-local component = require("component")
-
 local NodeSensor = {}
 NodeSensor.__index = NodeSensor
 
----Create a node sensor backed by a shared cache.
+---Create a node sensor backed by a shared component cache.
 ---The supplied configuration and cache are retained by reference and are not validated.
 ---@param config table | nil # Optional sensor configuration.
----@param cache Cache # Cache used for wrappers and previous snapshots.
+---@param cache Cache # Cache used for hardware wrappers.
 ---@return NodeSensor # New sensor with no observations and no pending request.
 function NodeSensor.new(config, cache)
     local self = setmetatable({}, NodeSensor)
@@ -124,8 +122,7 @@ function NodeSensor:forcePendingRequest()
 end
 
 ---Discover and poll all configured GT machine components.
----Replaces the current scan, stores the resulting array in the shared cache by reference,
----and may propagate component enumeration or wrapper polling errors.
+---Replaces the current scan retained on this sensor.
 ---@return MachineAvailabilityEntry[] # Internal availability array for the completed scan.
 function NodeSensor:scanMachines()
     self._machineAvailability = {}
@@ -138,7 +135,6 @@ function NodeSensor:scanMachines()
         end
     end
 
-    self._cache:setLastMachineScan(self._machineAvailability)
     return self._machineAvailability
 end
 
@@ -206,10 +202,9 @@ function NodeSensor:_watchBuffer()
         return
     end
 
-    local previous = self._cache:getLastBuffer()
+    local previous = self._bufferSnapshot
     if not previous or not self:_snapshotsEqual(previous, snapshot) then
         self._bufferSnapshot = snapshot
-        self._cache:setLastBuffer(snapshot)
         self._pendingRequest = true
         self:scanMachines()
     end

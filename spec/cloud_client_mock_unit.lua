@@ -119,15 +119,16 @@ test("Runtime forces one pending request in mock mode", function()
     package.loaded["NodeSensor"] = nil
     package.loaded["JobPool"] = nil
     package.loaded["Cache"] = nil
+    package.loaded["ComponentCache"] = nil
+    package.loaded["HardwareDiscovery"] = nil
+    package.loaded["ComponentDiscovery"] = nil
     package.loaded["Comms"] = {
         requestJSONPost = function() error("no http") end,
         requestJSON = function() error("no http") end,
     }
 
-    -- Avoid requiring real OC component during NodeSensor construction/tick.
-    package.loaded["component"] = {
-        list = function() return function() end end,
-    }
+    local mock_oc = require("mock_oc")
+    mock_oc.reset()
 
     local Runtime = require("Runtime")
     local runtime = Runtime.new({

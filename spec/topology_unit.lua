@@ -92,6 +92,71 @@ test("discovers full topology and produces stable fingerprints", function()
     eq(2, #first.globals.machineAddresses, "globals.machineAddresses in fingerprint inputs")
 end)
 
+test("ComponentCache reuses wrapper identity; Cache façades getComponent", function()
+    mock_oc.reset()
+    package.loaded.ComponentCache = nil
+    package.loaded.Cache = nil
+
+    local ComponentCache = require("ComponentCache")
+    local components = ComponentCache.new()
+    local first, err = components:getComponent("machine-lathe", "Machine")
+    assert(first, err)
+    local second = assert(components:getComponent("machine-lathe", "Machine"))
+    eq(first, second, "ComponentCache identity")
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    local viaCache = assert(cache:getComponent("machine-assembler", "Machine"))
+    local again = assert(cache:getComponent("machine-assembler", "Machine"))
+    eq(viaCache, again, "Cache façade identity")
+    eq("table", type(cache._components), "façade exposes or holds components via ComponentCache")
+    -- Façade must own a ComponentCache (or be one); wrapper store is not duplicated as raw tables only.
+    assert(cache._componentCache ~= nil or cache.getComponent == ComponentCache.getComponent,
+        "Cache should wrap or share ComponentCache")
+    local underlying = cache._componentCache or cache
+    eq(viaCache, underlying:getComponent("machine-assembler", "Machine"), "façade shares ComponentCache store")
+
+    cache:invalidate("machine-assembler")
+    local rebuilt = assert(cache:getComponent("machine-assembler", "Machine"))
+    eq(true, rebuilt ~= viaCache, "invalidate drops wrapper")
+end)
+
+test("NodeSensor owns buffer and machine-scan snapshots without Cache snapshot APIs", function()
+    mock_oc.reset()
+    package.loaded.Cache = nil
+    package.loaded.ComponentCache = nil
+    package.loaded.NodeSensor = nil
+
+    local Cache = require("Cache")
+    eq(nil, Cache.setLastBuffer, "Cache no longer stores buffer snapshots")
+    eq(nil, Cache.getLastBuffer, "Cache no longer reads buffer snapshots")
+    eq(nil, Cache.setLastMachineScan, "Cache no longer stores machine scans")
+    eq(nil, Cache.getLastMachineScan, "Cache no longer reads machine scans")
+
+    local cache = Cache.new()
+    local NodeSensor = require("NodeSensor")
+    local sensor = NodeSensor.new({
+        meControllerAddr = "me-controller",
+        machineFilter = "gt_machine",
+        jobRequestCooldown = 0,
+    }, cache)
+
+    mock_oc.set_buffer(
+        { { name = "minecraft:iron_ingot", label = "Iron Ingot", size = 64 } },
+        {}
+    )
+    sensor:tick()
+    local snap = sensor:bufferSnapshot()
+    assert(snap and snap.items and #snap.items >= 1, "sensor owns buffer snapshot")
+    local availability = sensor:machineAvailability()
+    eq(true, #availability >= 1, "sensor owns machine scan")
+
+    -- Second tick with same buffer must not treat cache as source of truth.
+    sensor:markRequestSent()
+    sensor:tick()
+    eq(false, sensor:hasPendingRequest(), "unchanged buffer does not re-pend without cache snapshots")
+end)
+
 if failures > 0 then
     os.exit(1)
 end
