@@ -323,6 +323,358 @@ test("interfaces are created lazily on READY mapping, not at discovery", functio
     Interface.new = originalNew
 end)
 
+local function seedGlobals(cache)
+    assert(cache:getComponent("db-staging", "DatabaseComponent", 9))
+    assert(cache:getComponent("redstone-001", "RedstoneComponent"))
+    assert(cache:getComponent("machine-lathe", "Machine"))
+    assert(cache:getComponent("transposer-001", "TransposerComponent"))
+    assert(cache:getComponent("transposer-002", "TransposerComponent"))
+end
+
+local function baseGlobals(redstoneSides)
+    return {
+        databaseAddress = "db-staging",
+        databaseSize = 9,
+        redstoneAddress = "redstone-001",
+        redstoneSides = redstoneSides or { start = 0, stop = 1 },
+        meControllerAddress = "me-controller",
+    }
+end
+
+local function readyMapping(overrides)
+    local mapping = {
+        machineAddress = "machine-lathe",
+        interfaceAddress = "iface-lathe",
+        transposerAddress = "transposer-001",
+        transposerSides = { pull = 3, input = 2, returnSide = 4 },
+        mappingRevision = 1,
+        status = "READY",
+    }
+    for key, value in pairs(overrides or {}) do
+        mapping[key] = value
+    end
+    return mapping
+end
+
+local function assignmentFor(mapping, jobId)
+    return {
+        jobId = jobId or "job-1",
+        machineAddress = mapping.machineAddress,
+        registry = {
+            machineAddress = mapping.machineAddress,
+            interfaceAddress = mapping.interfaceAddress,
+            transposerAddress = mapping.transposerAddress,
+            transposerSides = mapping.transposerSides,
+        },
+        sequenceFlow = {
+            items = {},
+            fluids = {},
+            steps = { { method = "wait", params = { ticks = 99 } } },
+        },
+    }
+end
+
+local function makeRuntimeHarness(cache, globals)
+    package.loaded.JobPool = nil
+    package.loaded.Runtime = nil
+    local JobPool = require("JobPool")
+    local Runtime = require("Runtime")
+    local machineStatuses = { ["machine-lathe"] = "UNMAPPED" }
+    local pool = JobPool.new({
+        cache = cache,
+        globals = globals,
+        machineStatus = function(address) return machineStatuses[address] end,
+        onTopologyConflict = function(address, reason)
+            machineStatuses[address] = "NEEDS_REVIEW"
+            pool._lastConflict = { address = address, reason = reason }
+        end,
+    })
+    local runtime = setmetatable({
+        _cache = cache,
+        _jobPool = pool,
+        _machineStatuses = machineStatuses,
+        _observation = { globals = globals },
+        _topologyRevision = 0,
+        _clusterStatus = "INITIALIZING",
+        _state = "INITIALIZING",
+        _config = {
+            meControllerAddr = globals.meControllerAddress,
+            databaseAddress = globals.databaseAddress,
+            databaseSize = globals.databaseSize,
+            redstoneAddress = globals.redstoneAddress,
+        },
+        _meController = assert(cache:getComponent(globals.meControllerAddress, "MeControllerComponent")),
+        _database = assert(cache:getComponent(globals.databaseAddress, "DatabaseComponent", globals.databaseSize)),
+        _redstone = assert(cache:getComponent(globals.redstoneAddress, "RedstoneComponent")),
+        _topologyProblems = {},
+    }, Runtime)
+    return runtime, pool, machineStatuses
+end
+
+test("JobPool submit reuses NodeCache node; missing node is topology_changed", function()
+    mock_oc.reset()
+    package.loaded.Cache = nil
+    package.loaded.ComponentCache = nil
+    package.loaded.NodeCache = nil
+    package.loaded.NodeComponent = nil
+    package.loaded.JobPool = nil
+    package.loaded.Assignment = nil
+
+    local Cache = require("Cache")
+    local JobPool = require("JobPool")
+    local cache = Cache.new()
+    seedGlobals(cache)
+    local globals = baseGlobals()
+    local mapping = readyMapping()
+    local node = assert(cache:buildNode(mapping, globals))
+
+    local statuses = { ["machine-lathe"] = "READY" }
+    local pool = JobPool.new({
+        cache = cache,
+        globals = globals,
+        machineStatus = function(address) return statuses[address] end,
+    })
+
+    local ok, err = pool:submit(assignmentFor(mapping, "job-reuse"))
+    eq(true, ok, "submit accepted: " .. tostring(err))
+    local run = pool:get("job-reuse")
+    assert(run and run.node, "run has node")
+    eq(node, run.node, "assignment reuses topology-owned node")
+
+    local emptyCache = Cache.new()
+    seedGlobals(emptyCache)
+    local orphanPool = JobPool.new({
+        cache = emptyCache,
+        globals = globals,
+        machineStatus = function() return "READY" end,
+    })
+    local rejected, rejectErr = orphanPool:submit(assignmentFor(mapping, "job-missing"))
+    eq(false, rejected, "missing node rejects submit")
+    eq(true, type(rejectErr) == "string" and rejectErr:find("topology_changed", 1, true) ~= nil,
+        "missing node reports topology_changed")
+    eq(nil, emptyCache:getNode("machine-lathe"), "reject does not invent a NodeCache entry")
+end)
+
+test("registry conflict quarantines without overwriting cached mapping", function()
+    mock_oc.reset()
+    package.loaded.Cache = nil
+    package.loaded.JobPool = nil
+    package.loaded.Runtime = nil
+    package.loaded.NodeComponent = nil
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    seedGlobals(cache)
+    assert(cache:getComponent("me-controller", "MeControllerComponent"))
+    local globals = baseGlobals()
+    local mapping = readyMapping()
+    local node = assert(cache:buildNode(mapping, globals))
+    local interfaceBefore = node.interfaceAddress
+    local transposerBefore = node.transposerAddress
+
+    local runtime, pool, statuses = makeRuntimeHarness(cache, globals)
+    statuses["machine-lathe"] = "READY"
+    pool._onTopologyConflict = function(address, reason)
+        runtime:_quarantineMachine(address, reason)
+    end
+
+    local conflicting = assignmentFor({
+        machineAddress = "machine-lathe",
+        interfaceAddress = "iface-other",
+        transposerAddress = mapping.transposerAddress,
+        transposerSides = mapping.transposerSides,
+    }, "job-conflict")
+    local ok, err = pool:submit(conflicting)
+    eq(false, ok, "conflicting registry rejected")
+    eq(true, type(err) == "string" and err:find("topology_changed", 1, true) ~= nil,
+        "conflict reports topology_changed")
+    eq("NEEDS_REVIEW", statuses["machine-lathe"], "machine quarantined")
+    local still = cache:getNode("machine-lathe")
+    eq(node, still, "NodeCache current generation unchanged")
+    eq(interfaceBefore, still.interfaceAddress, "interface mapping preserved")
+    eq(transposerBefore, still.transposerAddress, "transposer mapping preserved")
+end)
+
+test("topology apply rebuilds on binding, mappingRevision, and Global fingerprint change", function()
+    mock_oc.reset()
+    package.loaded.Cache = nil
+    package.loaded.JobPool = nil
+    package.loaded.Runtime = nil
+    package.loaded.NodeComponent = nil
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    seedGlobals(cache)
+    assert(cache:getComponent("me-controller", "MeControllerComponent"))
+    local globals = baseGlobals()
+    local runtime = makeRuntimeHarness(cache, globals)
+
+    local mapping = readyMapping()
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 1,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = globals.redstoneSides },
+        machines = { mapping },
+    }))
+    local first = assert(cache:getNode("machine-lathe"))
+    eq(1, first.mappingRevision, "initial revision")
+    eq("iface-lathe", first.interfaceAddress, "initial interface")
+
+    -- Same mappingRevision, different bindings → rebuild (not quarantine).
+    local rebound = readyMapping({
+        interfaceAddress = "iface-lathe-b",
+        mappingRevision = 1,
+    })
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 2,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = globals.redstoneSides },
+        machines = { rebound },
+    }))
+    local afterBinding = assert(cache:getNode("machine-lathe"))
+    eq(true, afterBinding ~= first, "binding change rebuilds node")
+    eq("iface-lathe-b", afterBinding.interfaceAddress, "new interface applied")
+    eq("READY", runtime._machineStatuses["machine-lathe"], "binding rebuild stays READY")
+
+    -- mappingRevision bump → rebuild.
+    local revised = readyMapping({
+        interfaceAddress = "iface-lathe-b",
+        mappingRevision = 2,
+    })
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 3,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = globals.redstoneSides },
+        machines = { revised },
+    }))
+    local afterRevision = assert(cache:getNode("machine-lathe"))
+    eq(true, afterRevision ~= afterBinding, "mappingRevision bump rebuilds")
+    eq(2, afterRevision.mappingRevision, "revision updated")
+
+    -- Global fingerprint change (redstone sides) → rebuild even with same mapping.
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 4,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = { start = 2, stop = 3 } },
+        machines = { revised },
+    }))
+    local afterGlobal = assert(cache:getNode("machine-lathe"))
+    eq(true, afterGlobal ~= afterRevision, "Global fingerprint change rebuilds")
+    eq(2, afterGlobal.redstoneSides.start, "cluster redstone sides applied")
+end)
+
+test("active generation kept across rebuild; retire when safe", function()
+    mock_oc.reset()
+    package.loaded.Cache = nil
+    package.loaded.JobPool = nil
+    package.loaded.Runtime = nil
+    package.loaded.NodeComponent = nil
+
+    local Cache = require("Cache")
+    local cache = Cache.new()
+    seedGlobals(cache)
+    assert(cache:getComponent("me-controller", "MeControllerComponent"))
+    local globals = baseGlobals()
+    local runtime, pool, statuses = makeRuntimeHarness(cache, globals)
+
+    local mapping = readyMapping()
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 1,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = globals.redstoneSides },
+        machines = { mapping },
+    }))
+    local gen1 = assert(cache:getNode("machine-lathe"))
+    statuses["machine-lathe"] = "READY"
+    assert(pool:submit(assignmentFor(mapping, "job-active")))
+    eq(gen1.cacheGeneration, pool:activeGeneration("machine-lathe"), "active holds gen1")
+
+    local revised = readyMapping({ mappingRevision = 2, interfaceAddress = "iface-next" })
+    assert(runtime:_applyTopologyResponse({
+        ready = true,
+        topologyRevision = 2,
+        clusterStatus = "READY",
+        cluster = { redstoneSides = globals.redstoneSides },
+        machines = { revised },
+    }))
+    local gen2 = assert(cache:getNode("machine-lathe"))
+    eq(true, gen2 ~= gen1, "rebuild creates new current generation")
+    eq(gen1, pool:get("job-active").node, "active run still holds prior generation")
+    eq(gen1.cacheGeneration, pool:activeGeneration("machine-lathe"), "activeGeneration stays gen1")
+    eq(gen2, cache:getNode("machine-lathe"), "getNode returns current gen2")
+    eq(true, cache:hasGeneration("machine-lathe", gen1.cacheGeneration),
+        "NodeCache retains active prior generation across rebuild")
+    eq(true, cache:hasGeneration("machine-lathe", gen2.cacheGeneration),
+        "NodeCache retains current generation")
+
+    -- Mistaken early retire must not drop the generation Runtime still considers active;
+    -- Runtime skips retire while activeGeneration matches. Direct retire is only safe after remove.
+    pool:remove("job-active")
+    eq(false, cache:hasGeneration("machine-lathe", gen1.cacheGeneration),
+        "prior generation retired when job is removed")
+    eq(gen2, cache:getNode("machine-lathe"), "current survives safe retire of prior")
+end)
+
+test("mock initialize yields READY mappings consumable by NodeCache", function()
+    mock_oc.reset()
+    mock_oc.set_proxy_override("transposer-001", {
+        getInventorySize = function(side) return side == 2 and 16 or nil end,
+        getInventoryName = function(side) return side == 2 and "input bus" or nil end,
+    })
+    package.loaded.Cache = nil
+    package.loaded.ComponentCache = nil
+    package.loaded.NodeCache = nil
+    package.loaded.NodeComponent = nil
+    package.loaded.CloudClient = nil
+    package.loaded.Comms = nil
+    package.loaded.HardwareDiscovery = nil
+    package.loaded.ComponentDiscovery = nil
+
+    package.loaded.Comms = {
+        requestJSONPost = function() error("HTTP should not run in mock initialize") end,
+        requestJSON = function() error("HTTP should not run in mock initialize") end,
+    }
+
+    local Cache = require("Cache")
+    local Discovery = require("HardwareDiscovery")
+    local CloudClient = require("CloudClient")
+    local cache = Cache.new()
+    local observation = assert(Discovery.discover({ clusterId = "cluster-a" }, cache))
+    local client = CloudClient.new({
+        clusterId = "cluster-a",
+        useMockAssignment = true,
+        mockAssignmentPath = "fixtures/mock_assignment.json",
+    })
+    local response = assert(client:initialize(observation))
+    eq(true, response.ready, "mock initialize ready")
+    eq("READY", response.clusterStatus, "mock cluster READY")
+    local mapping = response.machines and response.machines[1]
+    assert(mapping, "mock returns a machine mapping")
+    eq("READY", mapping.status, "mapping READY")
+    eq(true, type(mapping.machineAddress) == "string" and not mapping.machineAddress:find("^REPLACE_"),
+        "machine address resolved from observation")
+    eq(true, type(mapping.interfaceAddress) == "string" and not mapping.interfaceAddress:find("^REPLACE_"),
+        "interface address resolved")
+    eq(true, type(mapping.transposerAddress) == "string" and not mapping.transposerAddress:find("^REPLACE_"),
+        "transposer address resolved")
+
+    local globals = {
+        databaseAddress = observation.globals.databaseAddress,
+        databaseSize = observation.globals.databaseSize,
+        redstoneAddress = observation.globals.redstoneAddress,
+        redstoneSides = response.cluster.redstoneSides,
+    }
+    local node, err = cache:buildNode(mapping, globals)
+    assert(node, err)
+    eq(mapping.machineAddress, node.machineAddress, "NodeCache consumes mock mapping")
+    eq(mapping.mappingRevision, node.mappingRevision, "mappingRevision applied")
+end)
+
 if failures > 0 then
     os.exit(1)
 end

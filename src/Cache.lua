@@ -47,4 +47,9 @@ function Cache:retireGeneration(address, generation)
     return self._nodeCache:retireGeneration(address, generation)
 end
 
+---Return whether a node generation is still retained.
+function Cache:hasGeneration(address, generation)
+    return self._nodeCache:hasGeneration(address, generation)
+end
+
 return Cache

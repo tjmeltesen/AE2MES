@@ -35,12 +35,20 @@
 ---@field _runs table<string, JobRun> # Runs retained until explicitly removed.
 ---@field _pending Assignment | nil # Single assignment waiting for its selected machine.
 ---@field _clock fun(): number # Time source used for run timing and process timeouts.
+---@field _cache Cache | nil # Shared wrapper cache used for broker-global hardware.
+---@field _globals table | nil # Locally discovered broker-global hardware addresses.
 
 local Assignment = require("Assignment")
 local NodeComponent = require("NodeComponent")
 
 local JobPool = {}
 JobPool.__index = JobPool
+
+local function monotonicClock()
+    local ok, computer = pcall(require, "computer")
+    if ok and computer and type(computer.uptime) == "function" then return computer.uptime() end
+    return os.clock()
+end
 
 ---Shallow-copy each item record in an array.
 ---Nested values remain shared, non-array keys are omitted, and malformed item entries may raise an error.
@@ -59,12 +67,18 @@ local function copyItems(items)
 end
 
 ---Create an empty job pool using `os.time` as its clock.
+---@param options? { cache?: Cache, globals?: table }
 ---@return JobPool # New pool with no active, terminal, or pending assignments.
-function JobPool.new()
+function JobPool.new(options)
+    options = type(options) == "table" and options or {}
     local self = setmetatable({}, JobPool)
     self._runs = {}
     self._pending = nil
-    self._clock = os.time
+    self._clock = monotonicClock
+    self._cache = options.cache
+    self._globals = options.globals
+    self._machineStatus = options.machineStatus
+    self._onTopologyConflict = options.onTopologyConflict
     return self
 end
 
@@ -101,18 +115,36 @@ function JobPool:parseAssignment(input)
     return assignment
 end
 
----Construct and initialize a NodeComponent for an assignment.
----Component discovery and hardware wiring occur in `NodeComponent:configureFromRegistry`.
----@param assignment Assignment # Parsed assignment used to configure the node.
----@return NodeComponent | nil node # Initialized node, or nil when construction or wiring fails.
----@return string | nil error # Node construction or registry wiring error.
+---Reuse the topology-owned NodeCache node for an assignment.
+---Assignments never invent wiring when a cache is present: missing or conflicting
+---mappings fail with topology_changed. Without a cache (manual/smoke harnesses only),
+---falls back to configureFromRegistry.
+---@param assignment Assignment # Parsed assignment used to select the cached node.
+---@return NodeComponent | nil node # Cached or harness-built node, or nil on failure.
+---@return string | nil error # Missing node, merge conflict, or harness wiring error.
 function JobPool:createNode(assignment)
+    local machineAddress = assignment:machineAddress()
+    if self._cache then
+        if type(self._cache.getNode) ~= "function" then
+            return nil, "topology_changed: cache cannot resolve NodeCache nodes"
+        end
+        local cached = self._cache:getNode(machineAddress)
+        if not cached then
+            return nil, "topology_changed: no cached node for " .. tostring(machineAddress)
+        end
+        local ok, mergeErr = cached:mergeRegistry(assignment:registry())
+        if not ok then
+            if self._onTopologyConflict then self._onTopologyConflict(machineAddress, mergeErr) end
+            return nil, mergeErr
+        end
+        return cached
+    end
     local node = NodeComponent:new()
     if not node then
         return nil, "JobPool:createNode() — failed to create NodeComponent"
     end
 
-    local ok, err = node:configureFromRegistry(assignment:registry())
+    local ok, err = node:configureFromRegistry(assignment:registry(), self._globals, self._cache)
     if not ok then
         return nil, err or "JobPool:createNode() — failed to configure assignment registry"
     end
@@ -209,6 +241,9 @@ function JobPool:submit(input)
     end
 
     local jobId = assignment:id()
+    if self._machineStatus and self._machineStatus(assignment:machineAddress()) ~= "READY" then
+        return false, "topology_changed: machine is not READY"
+    end
     if self._runs[jobId] then
         return false, "JobPool:submit() — job already active: " .. jobId
     end
@@ -221,6 +256,38 @@ function JobPool:submit(input)
     end
 
     return self:startAssignment(assignment)
+end
+
+function JobPool:activeGeneration(machineAddress)
+    for _, run in pairs(self._runs) do
+        if run.machineAddress == machineAddress and run.state == "ACTIVE" and run.node then
+            return run.node.cacheGeneration
+        end
+    end
+    return nil
+end
+
+---Fault a queued, not-yet-started assignment when its machine is quarantined.
+function JobPool:rejectPendingForMachine(machineAddress, reason)
+    local rejected = false
+    if self._pending and self._pending:machineAddress() == machineAddress then
+        local assignment = self._pending
+        self._pending = nil
+        local run = {
+            jobId = assignment:id(), machineAddress = machineAddress, assignment = assignment,
+            stepIndex = 1, state = "ACTIVE", startedAt = self._clock(),
+        }
+        self._runs[run.jobId] = run
+        self:finishRun(run, false, reason or "topology_changed")
+        rejected = true
+    end
+    for _, run in pairs(self._runs) do
+        if run.machineAddress == machineAddress and run.state == "ACTIVE" and not run.executionStarted then
+            self:finishRun(run, false, reason or "topology_changed")
+            rejected = true
+        end
+    end
+    return rejected
 end
 
 ---Submit an assignment using the pool's compatibility alias.
@@ -272,8 +339,13 @@ function JobPool:finishRun(run, ok, err)
         machineAddress = run.machineAddress,
         success = ok == true,
         durationSeconds = math.max(0, run.completedAt - run.startedAt),
+        processingDurationMs = run.processingStartedAt
+            and math.floor(math.max(0, run.completedAt - run.processingStartedAt) * 1000 + 0.5)
+            or 0,
         itemsProcessed = ok and copyItems(run.assignment:sequenceFlow().items) or {},
     }
+    run.result.ok = run.result.success
+    run.result.durationMs = run.result.processingDurationMs
     if not ok then
         run.result.error = tostring(err or "job failed")
     end
@@ -285,6 +357,7 @@ end
 ---@param run JobRun # Active run record to mutate.
 ---@return nil
 function JobPool:tickRun(run)
+    run.executionStarted = true
     local flow = run.assignment:sequenceFlow()
     local step = flow:stepAt(run.stepIndex)
     if not step then
@@ -307,6 +380,8 @@ function JobPool:tickRun(run)
             self:finishRun(run, false, callOk and "transfer failed" or tostring(transferred))
             return
         end
+        -- transferToMachine returns only after the machine has confirmed active.
+        run.processingStartedAt = self._clock()
         run.stepIndex = run.stepIndex + 1
         run.stepStartedAt = nil
     elseif method == "waitForProcess" or method == "process" then
@@ -373,7 +448,11 @@ end
 ---@param jobId string # Stored job identifier.
 ---@return nil
 function JobPool:remove(jobId)
+    local run = self._runs[jobId]
     self._runs[jobId] = nil
+    if run and run.node and self._cache and self._cache.retireGeneration then
+        self._cache:retireGeneration(run.machineAddress, run.node.cacheGeneration)
+    end
 end
 
 ---Look up a stored run.

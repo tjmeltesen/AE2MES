@@ -4,7 +4,7 @@
 ---
 ---@class CloudClientConfig
 ---@field cloudBaseUrl any # Truthy value used as the URL prefix without type validation.
----@field nodeId any # Truthy value used as the node identifier without type validation.
+---@field clusterId any # Stable configured cluster identifier.
 ---@field useMockAssignment boolean|nil
 ---@field mockAssignmentPath string|nil
 ---
@@ -12,9 +12,10 @@
 ---@field _config CloudClientConfig # Node and cloud endpoint configuration, retained by reference.
 ---@field _comms Comms # Shared HTTP/JSON communications module.
 -- Endpoints:
--- POST /nodes/{nodeId}/jobs/request  — buffer + availability + activeJobs → assignments[]
+-- POST /clusters/{clusterId}/initialize   - observations -> approved topology
+-- POST /clusters/{clusterId}/jobs/request - buffer + ready machines -> assignments[]
 -- GET  /jobs/{jobId}                 — fetch assignment if cloud processes async
--- POST /nodes/{nodeId}/status        — heartbeat + active job snapshot
+-- POST /clusters/{clusterId}/status       - topology and active-job heartbeat
 -- POST /jobs/{jobId}/complete        — result uplink
 
 local JSON = require("JSON")
@@ -25,7 +26,7 @@ CloudClient.__index = CloudClient
 
 ---Create a cloud API client.
 ---Loads the shared Comms module and retains the supplied configuration table by reference.
----@param config CloudClientConfig | nil # Optional unvalidated cloudBaseUrl and nodeId values.
+---@param config CloudClientConfig | nil # Optional cloud URL and cluster identifier.
 ---@return CloudClient # New client instance.
 function CloudClient.new(config)
     local self = setmetatable({}, CloudClient)
@@ -40,10 +41,72 @@ function CloudClient:_baseUrl()
     return self._config.cloudBaseUrl or ""
 end
 
----Return the configured node identifier.
----@return any # Truthy configured value, or `"unknown-node"` when absent or false.
-function CloudClient:_nodeId()
-    return self._config.nodeId or "unknown-node"
+---Return the configured cluster identifier.
+---@return any # Truthy configured value, or `"unknown-cluster"` when absent or false.
+function CloudClient:_clusterId()
+    return self._config.clusterId or self._config.nodeId or "unknown-cluster"
+end
+
+
+---Upload one idempotent hardware observation and return MES mapping readiness.
+function CloudClient:initialize(observation)
+    if type(observation) ~= "table" then
+        return nil, "CloudClient:initialize() - expected observation table"
+    end
+    local payload = {
+        clusterId = self:_clusterId(),
+        globals = observation.globals,
+        components = observation.components,
+    }
+    if self:_mockEnabled() then
+        local body, err = self:_readMockAssignmentFile()
+        if not body then return nil, err end
+        local ok, data = pcall(JSON.decode, JSON, body)
+        if not ok or type(data) ~= "table" then return nil, "mock topology decode failed" end
+        local registry = data.registry or {}
+        local function observed(value, records)
+            if type(value) == "string" and not value:find("^REPLACE_") then
+                return value
+            end
+            if type(records) ~= "table" then
+                return value
+            end
+            -- Prefer the idle lathe fixture machine when present.
+            for _, record in ipairs(records) do
+                if record.address == "machine-lathe" then
+                    return record.address
+                end
+            end
+            return records[1] and records[1].address or value
+        end
+        local mapping = {
+            machineAddress = observed(data.machineAddress or registry.machineAddress,
+                observation.components and observation.components.machines),
+            interfaceAddress = observed(registry.interfaceAddress,
+                observation.components and observation.components.interfaces),
+            transposerAddress = observed(registry.transposerAddress,
+                observation.components and observation.components.transposers),
+            transposerSides = registry.transposerSides,
+        }
+        self._mockMapping = mapping
+        return {
+            ready = true,
+            topologyRevision = 1,
+            clusterStatus = "READY",
+            cluster = { redstoneSides = registry.redstoneSides or { start = 0, stop = 1 } },
+            machines = { {
+                machineAddress = mapping.machineAddress,
+                status = "READY",
+                mappingRevision = 1,
+                interfaceAddress = mapping.interfaceAddress,
+                transposerAddress = mapping.transposerAddress,
+                transposerSides = mapping.transposerSides,
+            } },
+            missingMappings = {},
+        }
+    end
+    local url = self:_baseUrl() .. "/clusters/" .. self:_clusterId() .. "/initialize"
+    return self._comms:requestJSONPost(url, payload)
 end
 
 function CloudClient:_mockEnabled()
@@ -110,7 +173,7 @@ function CloudClient:_applyBufferToAssignmentData(data, buffer)
 end
 
 ---Submit current node demand and availability for cloud scheduling.
----Overwrites `request.nodeId`, performs an HTTP POST, and parses the response as
+---Overwrites `request.clusterId`, performs an HTTP POST, and parses the response as
 ---an assignment envelope or single assignment. Transport and parse failures are returned.
 ---@param request table # Mutable job-request payload.
 ---@return Assignment[] | nil assignments # Parsed assignments, including an empty list when none are returned.
@@ -120,7 +183,7 @@ function CloudClient:submitJobRequest(request)
         return nil, "CloudClient:submitJobRequest() — expected request table"
     end
 
-    request.nodeId = self:_nodeId()
+    request.clusterId = self:_clusterId()
 
     if self:_mockEnabled() then
         local body, readErr = self:_readMockAssignmentFile()
@@ -135,12 +198,22 @@ function CloudClient:submitJobRequest(request)
 
         if type(data.assignments) == "table" then
             for _, entry in ipairs(data.assignments) do
+                if self._mockMapping then
+                    entry.machineAddress = self._mockMapping.machineAddress
+                    entry.registry = entry.registry or {}
+                    for key, value in pairs(self._mockMapping) do entry.registry[key] = value end
+                end
                 local applied, applyErr = self:_applyBufferToAssignmentData(entry, request.buffer)
                 if not applied then
                     return nil, applyErr
                 end
             end
         else
+            if self._mockMapping then
+                data.machineAddress = self._mockMapping.machineAddress
+                data.registry = data.registry or {}
+                for key, value in pairs(self._mockMapping) do data.registry[key] = value end
+            end
             local applied, applyErr = self:_applyBufferToAssignmentData(data, request.buffer)
             if not applied then
                 return nil, applyErr
@@ -150,14 +223,18 @@ function CloudClient:submitJobRequest(request)
         return Assignment.listFromJSON(JSON:encode(data))
     end
 
-    local url = self:_baseUrl() .. "/nodes/" .. self:_nodeId() .. "/jobs/request"
+    local url = self:_baseUrl() .. "/clusters/" .. self:_clusterId() .. "/jobs/request"
     local body, err = self._comms:requestJSONPost(url, request)
     if not body then
         return nil, err
     end
 
     local encoded = type(body) == "table" and JSON:encode(body) or tostring(body)
-    return Assignment.listFromJSON(encoded)
+    local assignments, parseErr = Assignment.listFromJSON(encoded)
+    return assignments, parseErr, type(body) == "table" and {
+        topologyRevision = body.topologyRevision,
+        reinitializeRequired = body.reinitializeRequired == true,
+    } or nil
 end
 
 ---Fetch and parse one assignment by job identifier.
@@ -196,7 +273,7 @@ function CloudClient:pollAssignment(jobId)
 end
 
 ---Post a heartbeat containing the node's active-job snapshot.
----The payload also includes the configured nodeId and current integer timestamp.
+---The payload also includes the configured clusterId and current integer timestamp.
 ---@param activeJobsSnapshot table # Array or map of active job status records.
 ---@return boolean ok # True when the POST completes without a reported error.
 ---@return string | nil error # Validation, serialization, transport, or response-decoding error.
@@ -210,17 +287,19 @@ function CloudClient:reportStatus(activeJobsSnapshot)
         for _ in pairs(activeJobsSnapshot) do
             count = count + 1
         end
-        print(string.format("[CloudClient:mock] status node=%s activeJobs=%s",
-            tostring(self:_nodeId()), tostring(count)))
+        print(string.format("[CloudClient:mock] status cluster=%s activeJobs=%s",
+            tostring(self:_clusterId()), tostring(count)))
         return true
     end
 
-    local url = self:_baseUrl() .. "/nodes/" .. self:_nodeId() .. "/status"
-    local _, err = self._comms:requestJSONPost(url, {
-        nodeId = self:_nodeId(),
-        activeJobs = activeJobsSnapshot,
-        timestamp = math.floor(os.time()),
-    })
+    local url = self:_baseUrl() .. "/clusters/" .. self:_clusterId() .. "/status"
+    local payload = activeJobsSnapshot
+    if activeJobsSnapshot.activeJobs == nil then
+        payload = { activeJobs = activeJobsSnapshot }
+    end
+    payload.clusterId = self:_clusterId()
+    payload.timestamp = math.floor(os.time())
+    local _, err = self._comms:requestJSONPost(url, payload)
 
     if err then
         return false, err

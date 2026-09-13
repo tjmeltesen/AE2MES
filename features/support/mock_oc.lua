@@ -142,6 +142,9 @@ local function buildProxy(address)
         setInterfaceConfiguration = function() return true end,
         clear = function() return true end,
         setOutput = function() return true end,
+        store = function()
+            return true
+        end,
     }
 
     return proxy

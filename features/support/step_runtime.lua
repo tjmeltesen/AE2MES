@@ -6,10 +6,10 @@ local world = require("world")
 Given("a runtime with mock cloud", function()
     local Runtime = require("Runtime")
     world.runtime = Runtime.new({
-        nodeId = "demo-node",
+        clusterId = "demo-cluster",
         cloudBaseUrl = "http://mes.local:8080",
-        meControllerAddr = "me-controller",
-        machineFilter = "gt_machine",
+        useMockAssignment = true,
+        mockAssignmentPath = "fixtures/mock_assignment.json",
         statusInterval = 0,
         jobRequestCooldown = 0,
     })

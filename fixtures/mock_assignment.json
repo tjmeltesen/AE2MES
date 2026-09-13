@@ -6,9 +6,6 @@
     "machineAddress": "REPLACE_MACHINE_ADDRESS",
     "transposerAddress": "REPLACE_TRANSPOSER_ADDRESS",
     "interfaceAddress": "REPLACE_INTERFACE_ADDRESS",
-    "databaseAddress": "REPLACE_DATABASE_ADDRESS",
-    "redstoneAddress": "REPLACE_REDSTONE_ADDRESS",
-    "databaseSize": 9,
     "transposerSides": {
       "pull": 5,
       "input": 0,

@@ -21,10 +21,10 @@ local function makeWaitJob(jobId, machineAddr)
 end
 
 Given("an empty job pool", function()
-    local Cache = require("Cache")
     local JobPool = require("JobPool")
-    world.cache = Cache.new()
-    world.jobPool = JobPool.new(world.cache)
+    -- Harness mode: no NodeCache, so wait-step concurrency tests can wire via configureFromRegistry.
+    world.cache = nil
+    world.jobPool = JobPool.new({})
 end)
 
 When("I spawn job \"(.+)\" on \"(.+)\"", function(jobId, machineAddr)

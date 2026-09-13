@@ -72,6 +72,18 @@ function NodeCache:get(address)
     return entry.byGeneration[entry.current]
 end
 
+---Return whether a specific generation is still retained for an address.
+---@param address string
+---@param generation integer
+---@return boolean
+function NodeCache:hasGeneration(address, generation)
+    if type(address) ~= "string" or type(generation) ~= "number" then
+        return false
+    end
+    local entry = self._entries[address]
+    return entry ~= nil and entry.byGeneration[generation] ~= nil
+end
+
 ---Drop a non-current generation when active work no longer holds it.
 ---Retiring the current generation is a no-op so get() stays stable until rebuild.
 ---@param address string

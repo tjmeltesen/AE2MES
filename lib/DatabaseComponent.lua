@@ -16,6 +16,7 @@
 ---@field size integer # Number of slots scanned by this wrapper.
 ---@field address string # OpenComputers component address inherited from BaseComponent.
 ---@field index DatabaseIndexEntry[] # Cached non-empty slot metadata.
+---@field _trackedSlots integer[]|nil # Slots written for the current submitted buffer.
 ---@field refreshIndex fun(self: DatabaseComponent): DatabaseIndexEntry[] # Rebuild the cached slot index.
 
 
@@ -39,6 +40,7 @@ function DatabaseComponent:new(address, size)
         size = 9
     end
     self.size = size
+    self._trackedSlots = nil
     self:refreshIndex()
 
     return self
@@ -135,8 +137,38 @@ function DatabaseComponent:getSize()
     return self.size
 end
 
+---Record a one-based slot written for the current buffer, without duplicates.
+---@param slot integer
+---@return nil
+function DatabaseComponent:trackSlot(slot)
+    if type(slot) ~= "number" then
+        return
+    end
+    self._trackedSlots = self._trackedSlots or {}
+    for _, tracked in ipairs(self._trackedSlots) do
+        if tracked == slot then
+            return
+        end
+    end
+    self._trackedSlots[#self._trackedSlots + 1] = slot
+end
+
+---Clear slots written for the current buffer and rebuild the cached index.
+---@return boolean clearedAny
+function DatabaseComponent:clearTracked()
+    local clearedAny = false
+    for _, slot in ipairs(self._trackedSlots or {}) do
+        if self:clear(slot) then
+            clearedAny = true
+        end
+    end
+    self._trackedSlots = nil
+    self:refreshIndex()
+    return clearedAny
+end
+
 ---Clear every one-based slot from 1 through `getSize`.
----Continues after component errors, does not refresh `self.index`, and returns whether any
+---Continues after component errors, resets tracking, refreshes `self.index`, and returns whether any
 ---clear call reported that a value had existed.
 ---@return boolean clearedAny
 function DatabaseComponent:clearAll()
@@ -146,6 +178,8 @@ function DatabaseComponent:clearAll()
             clearedAny = true
         end
     end
+    self._trackedSlots = nil
+    self:refreshIndex()
     return clearedAny
 end
 
