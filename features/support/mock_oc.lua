@@ -55,6 +55,9 @@ local function resolveType(address)
     if address:find("^db%-") or address:find("^database") then
         return "database"
     end
+    if address:find("^redstone") then
+        return "redstone"
+    end
     if address:find("^iface") then
         return "me_interface"
     end
@@ -111,13 +114,24 @@ local function buildProxy(address)
             end
             return cloneTable(state.buffer.fluids)
         end,
-        transferItem = function()
+        transferItem = function(...)
             if override.transferItem then
-                return override.transferItem()
+                return override.transferItem(...)
             end
             return state.transferCount
         end,
-        getInventorySize = function() return 9 end,
+        getInventorySize = function(...)
+            if override.getInventorySize then
+                return override.getInventorySize(...)
+            end
+            return 9
+        end,
+        getInventoryName = function(...)
+            if override.getInventoryName then
+                return override.getInventoryName(...)
+            end
+            return nil
+        end,
         get = function(_, slot)
             return { name = "minecraft:stone", size = 1, slot = slot }
         end,
@@ -139,12 +153,20 @@ local function installGlobals()
             return "mock doc for " .. tostring(methodName)
         end,
         list = function(filter)
-            local machines = { "machine-lathe", "machine-assembler" }
+            local byType = {
+                me_controller = { "me-controller" },
+                database = { "database-global" },
+                redstone = { "redstone-global" },
+                gt_machine = { "machine-lathe", "machine-assembler" },
+                me_interface = { "iface-store", "iface-stock" },
+                transposer = { "transposer-001" },
+            }
+            local addresses = byType[filter or "gt_machine"] or {}
             local index = 0
             return function()
                 index = index + 1
-                if machines[index] then
-                    return machines[index], filter or "gt_machine"
+                if addresses[index] then
+                    return addresses[index], filter or "gt_machine"
                 end
             end
         end,
