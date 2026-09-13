@@ -23,7 +23,7 @@ end
 Given("an empty job pool", function()
     local JobPool = require("JobPool")
     -- Harness mode: no NodeCache, so wait-step concurrency tests can wire via configureFromRegistry.
-    world.cache = nil
+    world.componentCache = nil
     world.jobPool = JobPool.new({})
 end)
 

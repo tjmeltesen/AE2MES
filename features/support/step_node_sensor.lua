@@ -4,13 +4,13 @@ local assertions = require("assertions")
 local world = require("world")
 
 Given("a node sensor with ME controller", function()
-    local Cache = require("Cache")
+    local ComponentCache = require("ComponentCache")
     local NodeSensor = require("NodeSensor")
-    world.cache = Cache.new()
+    world.componentCache = ComponentCache.new()
     world.nodeSensor = NodeSensor.new({
         machineFilter = "gt_machine",
         meControllerAddr = "me-controller",
-    }, world.cache)
+    }, world.componentCache)
 end)
 
 When("I scan machines", function()
@@ -24,7 +24,8 @@ end)
 When("job pool has busy machine \"(.+)\"", function(machineAddr)
     local JobPool = require("JobPool")
     local Assignment = require("Assignment")
-    world.jobPool = JobPool.new(world.cache)
+    -- Harness mode: no NodeCache, so wait-step concurrency tests can wire via configureFromRegistry.
+    world.jobPool = JobPool.new({})
     world.jobPool:spawn(Assignment.fromTable({
         jobId = "job-busy",
         machineAddress = machineAddr,
@@ -55,7 +56,7 @@ Then("machine \"(.+)\" should be busy", function(machineAddr)
 end)
 
 When("I tick node sensor", function()
-    world.cache:getComponent("me-controller", "MeControllerComponent")
+    world.componentCache:getComponent("me-controller", "MeControllerComponent")
     world.nodeSensor:tick()
 end)
 

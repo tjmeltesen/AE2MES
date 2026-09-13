@@ -1,5 +1,5 @@
 local world = {
-    cache = nil,
+    componentCache = nil,
     executor = nil,
     hardware = nil,
     assignment = nil,
@@ -16,7 +16,7 @@ local world = {
 }
 
 function world.reset()
-    world.cache = nil
+    world.componentCache = nil
     world.executor = nil
     world.hardware = nil
     world.assignment = nil

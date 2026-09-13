@@ -2,7 +2,7 @@
 ---@brief Stores READY NodeComponent generations keyed by machine address.
 ---@version 1.0.0
 ---@class NodeCache
----@field _componentCache ComponentCache|Cache # Sticky Global / wrapper identity store.
+---@field _componentCache ComponentCache # Sticky Global / wrapper identity store.
 ---@field _entries table<string, { current: integer, byGeneration: table<integer, NodeComponent> }>
 ---@field _nextGeneration integer
 
@@ -12,7 +12,7 @@ local NodeCache = {}
 NodeCache.__index = NodeCache
 
 ---Create a node-generation cache that builds through ComponentCache.
----@param componentCache ComponentCache|Cache # Hardware wrapper identity store used by fromMapping.
+---@param componentCache ComponentCache # Hardware wrapper identity store used by fromMapping.
 ---@return NodeCache
 function NodeCache.new(componentCache)
     local self = setmetatable({}, NodeCache)

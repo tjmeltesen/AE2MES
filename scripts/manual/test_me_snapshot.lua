@@ -4,7 +4,7 @@
 
 package.path = "./src/?.lua;./lib/?.lua;" .. package.path
 
-local Cache = require("Cache")
+local ComponentCache = require("ComponentCache")
 local component = require("component")
 
 local ME_CONTROLLER_ADDR = "61df706b-463f-453f-ba71-c2c43a79e12a"
@@ -127,8 +127,8 @@ print("ME snapshot test")
 printComponentType(ME_CONTROLLER_ADDR)
 printRawNetwork(ME_CONTROLLER_ADDR)
 
-local cache = Cache.new()
-local controller = cache:getComponent(ME_CONTROLLER_ADDR, "MeControllerComponent")
+local components = ComponentCache.new()
+local controller = components:getComponent(ME_CONTROLLER_ADDR, "MeControllerComponent")
 if not controller then
     print("")
     print("FAIL: could not create MeControllerComponent wrapper")

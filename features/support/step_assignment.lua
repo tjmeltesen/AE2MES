@@ -60,11 +60,7 @@ Then("assignment step (%d+) type should be \"(.+)\"", function(index, stepType)
 end)
 
 Given("a registry from the parsed assignment", function()
-    local Cache = require("Cache")
-    local HardwareContext = require("HardwareContext")
-    world.cache = Cache.new()
-    world.assignment = world.assignments[1]
-    world.hardware, world.lastError = HardwareContext.fromRegistry(world.assignment:registry(), world.cache)
+    error("HardwareContext removed; use NodeComponent/JobPool seams")
 end)
 
 Then("hardware context should resolve transposer to \"(.+)\"", function(address)
@@ -183,19 +179,7 @@ Given("a transfer assignment with sides and zero moved", function()
 end)
 
 When("I begin the executor", function()
-    local Cache = require("Cache")
-    local HardwareContext = require("HardwareContext")
-    local Executor = require("Executor")
-
-    world.cache = world.cache or Cache.new()
-    world.hardware = HardwareContext.fromRegistry(world.assignment:registry(), world.cache)
-    world.executor = Executor.new(world.cache, { verbose = false })
-    world.executor:begin(
-        world.hardware,
-        world.assignment:sequenceFlow(),
-        world.assignment:id(),
-        world.assignment:machineAddress()
-    )
+    error("Executor removed; step sequences covered by JobPool specs")
 end)
 
 When("the executor ticks until inactive", function()

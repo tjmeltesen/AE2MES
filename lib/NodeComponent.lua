@@ -71,10 +71,10 @@ end
 ---not during discovery. Cluster `redstoneSides` come from Globals only.
 ---@param mapping table # Cloud machine mapping (addresses, sides, mappingRevision, status).
 ---@param globals? { databaseAddress?: string, databaseSize?: integer, redstoneAddress?: string, redstoneSides?: table }
----@param cache? ComponentCache|Cache # Hardware wrapper identity store.
+---@param componentCache? ComponentCache # Hardware wrapper identity store.
 ---@return NodeComponent|nil node
 ---@return string|nil error
-function NodeComponent:fromMapping(mapping, globals, cache)
+function NodeComponent:fromMapping(mapping, globals, componentCache)
     if type(mapping) ~= "table" then
         return nil, "NodeComponent:fromMapping() — expected machine mapping table"
     end
@@ -92,7 +92,7 @@ function NodeComponent:fromMapping(mapping, globals, cache)
     }
 
     local node = NodeComponent:new()
-    local ok, err = node:configureFromRegistry(registry, globals, cache)
+    local ok, err = node:configureFromRegistry(registry, globals, componentCache)
     if not ok then
         return nil, err
     end
@@ -109,10 +109,10 @@ end
 ---Missing component addresses are allowed because some workflows use only a subset of wrappers.
 ---@param registry table # Raw registry map or Assignment Registry wrapper.
 ---@param globals? { databaseAddress?: string, databaseSize?: integer, redstoneAddress?: string }
----@param cache? ComponentCache|Cache # Sticky ComponentCache (or Cache façade) for wrapper identity.
+---@param componentCache? ComponentCache # Sticky ComponentCache for wrapper identity.
 ---@return boolean ok # True when every requested wrapper was constructed.
 ---@return string | nil error # Component construction or registry validation error.
-function NodeComponent:configureFromRegistry(registry, globals, cache)
+function NodeComponent:configureFromRegistry(registry, globals, componentCache)
     if type(registry) ~= "table" then
         return false, "NodeComponent:configureFromRegistry() — expected registry table"
     end
@@ -131,7 +131,7 @@ function NodeComponent:configureFromRegistry(registry, globals, cache)
 
     if machineAddr then
         local _, setErr
-        if cache then self.machine, setErr = cache:getComponent(machineAddr, "Machine")
+        if componentCache then self.machine, setErr = componentCache:getComponent(machineAddr, "Machine")
         else self.machine, setErr = self:setMachine(machineAddr) end
         if setErr then
             return false, setErr
@@ -140,7 +140,7 @@ function NodeComponent:configureFromRegistry(registry, globals, cache)
 
     if transposerAddr then
         local _, setErr
-        if cache then self.transposer, setErr = cache:getComponent(transposerAddr, "TransposerComponent")
+        if componentCache then self.transposer, setErr = componentCache:getComponent(transposerAddr, "TransposerComponent")
         else self.transposer, setErr = self:setTransposer(transposerAddr) end
         if setErr then
             return false, setErr
@@ -149,8 +149,8 @@ function NodeComponent:configureFromRegistry(registry, globals, cache)
 
     if databaseAddr then
         local database, setErr
-        if cache then
-            database, setErr = cache:getComponent(
+        if componentCache then
+            database, setErr = componentCache:getComponent(
                 databaseAddr,
                 "DatabaseComponent",
                 globals.databaseSize
@@ -166,7 +166,7 @@ function NodeComponent:configureFromRegistry(registry, globals, cache)
 
     if interfaceAddr then
         local _, setErr
-        if cache then self.interface, setErr = cache:getComponent(interfaceAddr, "Interface", self.database)
+        if componentCache then self.interface, setErr = componentCache:getComponent(interfaceAddr, "Interface", self.database)
         else self.interface, setErr = self:setInterface(interfaceAddr) end
         if setErr then
             return false, setErr
@@ -175,8 +175,8 @@ function NodeComponent:configureFromRegistry(registry, globals, cache)
 
     if redstoneAddr then
         local redstone, setErr
-        if cache then
-            redstone, setErr = cache:getComponent(redstoneAddr, "RedstoneComponent")
+        if componentCache then
+            redstone, setErr = componentCache:getComponent(redstoneAddr, "RedstoneComponent")
             self.redstone = redstone
         else
             redstone, setErr = self:setRedstone(redstoneAddr)

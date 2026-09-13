@@ -20,7 +20,7 @@
 ---
 ---@class NodeSensor
 ---@field _config table # Sensor intervals, addresses, and component filter configuration.
----@field _cache Cache # Shared component cache used for ME and machine wrappers.
+---@field _componentCache ComponentCache # Hardware wrapper identity store for ME and machines.
 ---@field _bufferSnapshot BufferSnapshot | nil # Last changed buffer snapshot observed by this instance.
 ---@field _machineAvailability MachineAvailabilityEntry[] # Most recent hardware scan.
 ---@field _pendingRequest boolean # Whether a changed buffer is awaiting a cloud request.
@@ -29,15 +29,15 @@
 local NodeSensor = {}
 NodeSensor.__index = NodeSensor
 
----Create a node sensor backed by a shared component cache.
+---Create a node sensor backed by a ComponentCache for hardware wrappers.
 ---The supplied configuration and cache are retained by reference and are not validated.
 ---@param config table | nil # Optional sensor configuration.
----@param cache Cache # Cache used for hardware wrappers.
+---@param componentCache ComponentCache # ComponentCache used for hardware wrappers.
 ---@return NodeSensor # New sensor with no observations and no pending request.
-function NodeSensor.new(config, cache)
+function NodeSensor.new(config, componentCache)
     local self = setmetatable({}, NodeSensor)
     self._config = config or {}
-    self._cache = cache
+    self._componentCache = componentCache
     self._bufferSnapshot = nil
     self._machineAvailability = {}
     self._pendingRequest = false
@@ -156,7 +156,7 @@ end
 ---@param address string # OpenComputers machine component address.
 ---@return MachineAvailabilityEntry | nil # Scheduling record, or nil when the wrapper or proxy is unavailable.
 function NodeSensor:_pollMachine(address)
-    local machine = self._cache:getComponent(address, "Machine")
+    local machine = self._componentCache:getComponent(address, "Machine")
     if not machine then
         return nil
     end
@@ -192,7 +192,7 @@ function NodeSensor:_watchBuffer()
         return
     end
 
-    local controller = self._cache:getComponent(address, "MeControllerComponent")
+    local controller = self._componentCache:getComponent(address, "MeControllerComponent")
     if not controller then
         return
     end

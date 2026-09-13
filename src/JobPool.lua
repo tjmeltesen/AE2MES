@@ -35,7 +35,8 @@
 ---@field _runs table<string, JobRun> # Runs retained until explicitly removed.
 ---@field _pending Assignment | nil # Single assignment waiting for its selected machine.
 ---@field _clock fun(): number # Time source used for run timing and process timeouts.
----@field _cache Cache | nil # Shared wrapper cache used for broker-global hardware.
+---@field _nodeCache NodeCache | nil # Topology-owned READY nodes reused by assignments.
+---@field _componentCache ComponentCache | nil # Harness-only wrapper store for configureFromRegistry.
 ---@field _globals table | nil # Locally discovered broker-global hardware addresses.
 
 local Assignment = require("Assignment")
@@ -67,7 +68,7 @@ local function copyItems(items)
 end
 
 ---Create an empty job pool using `os.time` as its clock.
----@param options? { cache?: Cache, globals?: table }
+---@param options? { nodeCache?: NodeCache, componentCache?: ComponentCache, globals?: table }
 ---@return JobPool # New pool with no active, terminal, or pending assignments.
 function JobPool.new(options)
     options = type(options) == "table" and options or {}
@@ -75,7 +76,8 @@ function JobPool.new(options)
     self._runs = {}
     self._pending = nil
     self._clock = monotonicClock
-    self._cache = options.cache
+    self._nodeCache = options.nodeCache
+    self._componentCache = options.componentCache
     self._globals = options.globals
     self._machineStatus = options.machineStatus
     self._onTopologyConflict = options.onTopologyConflict
@@ -116,19 +118,16 @@ function JobPool:parseAssignment(input)
 end
 
 ---Reuse the topology-owned NodeCache node for an assignment.
----Assignments never invent wiring when a cache is present: missing or conflicting
----mappings fail with topology_changed. Without a cache (manual/smoke harnesses only),
+---Assignments never invent wiring when a NodeCache is present: missing or conflicting
+---mappings fail with topology_changed. Without a NodeCache (manual/smoke harnesses only),
 ---falls back to configureFromRegistry.
 ---@param assignment Assignment # Parsed assignment used to select the cached node.
 ---@return NodeComponent | nil node # Cached or harness-built node, or nil on failure.
 ---@return string | nil error # Missing node, merge conflict, or harness wiring error.
 function JobPool:createNode(assignment)
     local machineAddress = assignment:machineAddress()
-    if self._cache then
-        if type(self._cache.getNode) ~= "function" then
-            return nil, "topology_changed: cache cannot resolve NodeCache nodes"
-        end
-        local cached = self._cache:getNode(machineAddress)
+    if self._nodeCache then
+        local cached = self._nodeCache:get(machineAddress)
         if not cached then
             return nil, "topology_changed: no cached node for " .. tostring(machineAddress)
         end
@@ -144,7 +143,7 @@ function JobPool:createNode(assignment)
         return nil, "JobPool:createNode() — failed to create NodeComponent"
     end
 
-    local ok, err = node:configureFromRegistry(assignment:registry(), self._globals, self._cache)
+    local ok, err = node:configureFromRegistry(assignment:registry(), self._globals, self._componentCache)
     if not ok then
         return nil, err or "JobPool:createNode() — failed to configure assignment registry"
     end
@@ -450,8 +449,8 @@ end
 function JobPool:remove(jobId)
     local run = self._runs[jobId]
     self._runs[jobId] = nil
-    if run and run.node and self._cache and self._cache.retireGeneration then
-        self._cache:retireGeneration(run.machineAddress, run.node.cacheGeneration)
+    if run and run.node and self._nodeCache then
+        self._nodeCache:retireGeneration(run.machineAddress, run.node.cacheGeneration)
     end
 end
 

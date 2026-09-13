@@ -19,7 +19,8 @@
 ---
 ---@class Runtime
 ---@field _config RuntimeConfig # Runtime configuration retained by reference.
----@field _cache Cache # Shared component and observation cache.
+---@field _componentCache ComponentCache # Hardware wrapper identity store.
+---@field _nodeCache NodeCache # Topology-owned READY NodeComponent generations.
 ---@field _cloudClient CloudClient # Cloud API client.
 ---@field _nodeSensor NodeSensor # Buffer and machine sensor.
 ---@field _jobPool JobPool # Assignment scheduler and executor.
@@ -32,7 +33,8 @@
 ---@field _lastNoAssignmentDebug string | nil # Signature used to suppress repeated empty-assignment logs.
 ---@field _running boolean # Whether `tick` should perform work.
 
-local Cache = require("Cache")
+local ComponentCache = require("ComponentCache")
+local NodeCache = require("NodeCache")
 local CloudClient = require("CloudClient")
 local NodeSensor = require("NodeSensor")
 local JobPool = require("JobPool")
@@ -51,8 +53,9 @@ function Runtime.new(config)
     local self = setmetatable({}, Runtime)
     self._config = config or {}
     self._config.clusterId = self._config.clusterId or self._config.nodeId or "unknown-cluster"
-    self._cache = Cache.new()
-    local globals, discoveryErr = HardwareDiscovery.discover(self._config, self._cache)
+    self._componentCache = ComponentCache.new()
+    self._nodeCache = NodeCache.new(self._componentCache)
+    local globals, discoveryErr = HardwareDiscovery.discover(self._config, self._componentCache)
     if not globals then
         error(discoveryErr)
     end
@@ -73,14 +76,14 @@ function Runtime.new(config)
     end
     globals.components = globals.components or { machines = {}, interfaces = {}, transposers = {} }
     self._config.machineAddresses = globals.machineAddresses
-    local controller, controllerErr = self._cache:getComponent(
+    local controller, controllerErr = self._componentCache:getComponent(
         globals.meControllerAddr,
         "MeControllerComponent"
     )
     if not controller then
         error(controllerErr or "Runtime.new() — failed to create discovered ME controller")
     end
-    local database, databaseErr = self._cache:getComponent(
+    local database, databaseErr = self._componentCache:getComponent(
         globals.databaseAddress,
         "DatabaseComponent",
         globals.databaseSize
@@ -88,7 +91,7 @@ function Runtime.new(config)
     if not database then
         error(databaseErr or "Runtime.new() — failed to create discovered database")
     end
-    local redstone, redstoneErr = self._cache:getComponent(
+    local redstone, redstoneErr = self._componentCache:getComponent(
         globals.redstoneAddress,
         "RedstoneComponent"
     )
@@ -97,7 +100,7 @@ function Runtime.new(config)
     end
     local machines = {}
     for _, machineAddress in ipairs(globals.machineAddresses) do
-        local machine, machineErr = self._cache:getComponent(
+        local machine, machineErr = self._componentCache:getComponent(
             machineAddress,
             "Machine"
         )
@@ -111,9 +114,9 @@ function Runtime.new(config)
     self._redstone = redstone
     self._database:clearAll()
     self._cloudClient = CloudClient.new(self._config) -- Instatiate cloud client with config.
-    self._nodeSensor = NodeSensor.new(self._config, self._cache)
+    self._nodeSensor = NodeSensor.new(self._config, self._componentCache)
     self._jobPool = JobPool.new({
-        cache = self._cache,
+        nodeCache = self._nodeCache,
         globals = globals,
         machineStatus = function(address) return self._machineStatuses[address] end,
         onTopologyConflict = function(address, reason) self:_quarantineMachine(address, reason) end,
@@ -207,11 +210,11 @@ function Runtime:_applyTopologyResponse(response)
         self._config.databaseAddress = globals.databaseAddress
         self._config.databaseSize = globals.databaseSize
         self._config.redstoneAddress = globals.redstoneAddress
-        self._meController = assert(self._cache:getComponent(globals.meControllerAddress, "MeControllerComponent"))
-        local nextDatabase = assert(self._cache:getComponent(globals.databaseAddress, "DatabaseComponent", globals.databaseSize))
+        self._meController = assert(self._componentCache:getComponent(globals.meControllerAddress, "MeControllerComponent"))
+        local nextDatabase = assert(self._componentCache:getComponent(globals.databaseAddress, "DatabaseComponent", globals.databaseSize))
         if nextDatabase ~= self._database then nextDatabase:clearAll() end
         self._database = nextDatabase
-        self._redstone = assert(self._cache:getComponent(globals.redstoneAddress, "RedstoneComponent"))
+        self._redstone = assert(self._componentCache:getComponent(globals.redstoneAddress, "RedstoneComponent"))
     end
 
     local seen = {}
@@ -222,17 +225,17 @@ function Runtime:_applyTopologyResponse(response)
             seen[address] = true
             self._machineStatuses[address] = mapping.status or "UNMAPPED"
             if self._machineStatuses[address] == "READY" then
-                local current = self._cache:getNode(address)
+                local current = self._nodeCache:get(address)
                 local needsRebuild = globalChanged or not current
                     or current.mappingRevision ~= mapping.mappingRevision
                     or mappingBindingsChanged(current, mapping)
                 if needsRebuild then
                     local previousGeneration = current and current.cacheGeneration
-                    local node, err = self._cache:buildNode(mapping, self._jobPool._globals)
+                    local node, err = self._nodeCache:build(mapping, self._jobPool._globals)
                     if not node then self:_quarantineMachine(address, err) allReady = false end
                     if node and previousGeneration
                         and self._jobPool:activeGeneration(address) ~= previousGeneration then
-                        self._cache:retireGeneration(address, previousGeneration)
+                        self._nodeCache:retireGeneration(address, previousGeneration)
                     end
                 else
                     local compatible, conflict = current:mergeRegistry(mapping)
@@ -265,7 +268,7 @@ function Runtime:_refreshTopology(force)
     if now < self._topologyBackoffUntil then return false end
     local interval = self._config.topologyCheckInterval or 30
     if not force and now - self._lastTopologyCheckAt < interval then return true end
-    local observation, discoveryErr = HardwareDiscovery.discover(self._config, self._cache)
+    local observation, discoveryErr = HardwareDiscovery.discover(self._config, self._componentCache)
     if not observation then
         self._topologyBackoffUntil = now + (self._config.initializationRetryDelay or 5)
         print("[Runtime] topology discovery failed: " .. tostring(discoveryErr))

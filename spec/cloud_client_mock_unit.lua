@@ -118,8 +118,8 @@ test("Runtime forces one pending request in mock mode", function()
     package.loaded["CloudClient"] = nil
     package.loaded["NodeSensor"] = nil
     package.loaded["JobPool"] = nil
-    package.loaded["Cache"] = nil
     package.loaded["ComponentCache"] = nil
+    package.loaded["NodeCache"] = nil
     package.loaded["HardwareDiscovery"] = nil
     package.loaded["ComponentDiscovery"] = nil
     package.loaded["Comms"] = {
