@@ -12,4 +12,5 @@ fi
 
 lua spec/cloud_client_mock_unit.lua
 lua spec/topology_unit.lua
+lua spec/logger_unit.lua
 busted "$@"

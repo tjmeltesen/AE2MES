@@ -22,6 +22,7 @@ Load these modules by bare name — `main.lua` puts `./lib/?.lua` on
 | `ComponentCache.lua` | Identity | Reuses hardware wrappers keyed by `className:address` |
 | `NetworkItems.lua` | Pure functions | Normalizes raw AE2 item/fluid results into plain snapshot tables |
 | `Comms.lua` | Singleton | Serialized HTTP/JSON/TCP over the internet card |
+| `Logger.lua` | Singleton | Leveled console facade (`configure` + debug/info/warn/error) |
 | `JSON.lua` | Vendored | Jeffrey Friedl's pure-Lua JSON encoder/decoder |
 
 ## Inheritance and composition
